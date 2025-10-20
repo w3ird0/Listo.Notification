@@ -3244,13 +3244,594 @@ public class PaginatedResponse<T>
 
 ## 8. Validation & Error Handling
 
-- **Request Validation:** Use DataAnnotations and/or FluentValidation.
-- **Error Handling:** Implement global exception middleware for consistent error responses.
-- **Response Formatting:** Standardize success/error responses as per API spec.
+This section covers comprehensive input validation, error handling patterns, and consistent response formatting.
+
+### 8.1. FluentValidation Setup
+
+**Installation:**
+```bash
+dotnet add package FluentValidation.AspNetCore
+```
+
+**Configuration (Program.cs):**
+```csharp
+using FluentValidation;
+using FluentValidation.AspNetCore;
+
+builder.Services.AddFluentValidationAutoValidation();
+builder.Services.AddFluentValidationClientsideAdapters();
+builder.Services.AddValidatorsFromAssemblyContaining<Program>();
+
+// Disable default ModelState validation to use FluentValidation exclusively
+builder.Services.Configure<ApiBehaviorOptions>(options =>
+{
+    options.SuppressModelStateInvalidFilter = true;
+});
+```
 
 ---
 
-## 8. Notification Sending Integrations
+### 8.2. Request Validators
+
+#### SendNotificationRequestValidator
+
+```csharp
+using FluentValidation;
+using Listo.Notification.API.Models.Requests;
+
+namespace Listo.Notification.Application.Validators;
+
+public class SendNotificationRequestValidator : AbstractValidator<SendNotificationRequest>
+{
+    public SendNotificationRequestValidator()
+    {
+        RuleFor(x => x.UserId)
+            .NotEmpty().WithMessage("UserId is required")
+            .Must(BeValidGuid).WithMessage("UserId must be a valid GUID");
+
+        RuleFor(x => x.Channel)
+            .NotEmpty().WithMessage("Channel is required")
+            .Must(BeValidChannel).WithMessage("Channel must be push, sms, email, or inApp");
+
+        RuleFor(x => x.TemplateKey)
+            .NotEmpty().WithMessage("TemplateKey is required")
+            .MaximumLength(100).WithMessage("TemplateKey must not exceed 100 characters")
+            .Matches("^[a-z0-9_]+$").WithMessage("TemplateKey must be lowercase alphanumeric with underscores");
+
+        RuleFor(x => x.Priority)
+            .NotEmpty().WithMessage("Priority is required")
+            .Must(BeValidPriority).WithMessage("Priority must be high, normal, or low");
+
+        RuleFor(x => x.Data)
+            .NotNull().WithMessage("Data is required")
+            .Must(dict => dict.Count > 0).WithMessage("Data must contain at least one key-value pair");
+
+        When(x => x.ScheduledAt.HasValue, () =>
+        {
+            RuleFor(x => x.ScheduledAt)
+                .Must(BeInFuture).WithMessage("ScheduledAt must be in the future");
+        });
+    }
+
+    private bool BeValidGuid(string? value) => 
+        !string.IsNullOrEmpty(value) && Guid.TryParse(value, out _);
+
+    private bool BeValidChannel(string? channel) =>
+        new[] { "push", "sms", "email", "inApp" }.Contains(channel?.ToLower());
+
+    private bool BeValidPriority(string? priority) =>
+        new[] { "high", "normal", "low" }.Contains(priority?.ToLower());
+
+    private bool BeInFuture(DateTime? dateTime) =>
+        dateTime > DateTime.UtcNow;
+}
+```
+
+#### RegisterDeviceRequestValidator
+
+```csharp
+public class RegisterDeviceRequestValidator : AbstractValidator<RegisterDeviceRequest>
+{
+    public RegisterDeviceRequestValidator()
+    {
+        RuleFor(x => x.DeviceToken)
+            .NotEmpty().WithMessage("DeviceToken is required")
+            .MinimumLength(10).WithMessage("DeviceToken appears to be invalid (too short)")
+            .MaximumLength(500).WithMessage("DeviceToken exceeds maximum length");
+
+        RuleFor(x => x.Platform)
+            .NotEmpty().WithMessage("Platform is required")
+            .Must(BeValidPlatform).WithMessage("Platform must be android, ios, or web");
+
+        RuleFor(x => x.DeviceInfo)
+            .Must(BeValidJson).When(x => !string.IsNullOrEmpty(x.DeviceInfo))
+            .WithMessage("DeviceInfo must be valid JSON");
+    }
+
+    private bool BeValidPlatform(string? platform) =>
+        new[] { "android", "ios", "web" }.Contains(platform?.ToLower());
+
+    private bool BeValidJson(string? json)
+    {
+        if (string.IsNullOrEmpty(json)) return true;
+        try
+        {
+            JsonDocument.Parse(json);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+}
+```
+
+#### QueueNotificationRequestValidator
+
+```csharp
+public class QueueNotificationRequestValidator : AbstractValidator<QueueNotificationRequest>
+{
+    public QueueNotificationRequestValidator()
+    {
+        RuleFor(x => x.UserId)
+            .NotEmpty().WithMessage("UserId is required")
+            .Must(BeValidGuid).WithMessage("UserId must be a valid GUID");
+
+        RuleFor(x => x.ServiceOrigin)
+            .NotEmpty().WithMessage("ServiceOrigin is required")
+            .Must(BeValidServiceOrigin).WithMessage("ServiceOrigin must be auth, orders, ridesharing, products, or system");
+
+        RuleFor(x => x.Channel)
+            .NotEmpty().WithMessage("Channel is required")
+            .Must(BeValidChannel).WithMessage("Channel must be push, sms, email, or inApp");
+
+        RuleFor(x => x.TemplateKey)
+            .NotEmpty().WithMessage("TemplateKey is required")
+            .MaximumLength(100).WithMessage("TemplateKey must not exceed 100 characters");
+
+        RuleFor(x => x.Priority)
+            .NotEmpty().WithMessage("Priority is required")
+            .Must(BeValidPriority).WithMessage("Priority must be high, normal, or low");
+
+        When(x => x.Synchronous, () =>
+        {
+            RuleFor(x => x.Channel)
+                .Equal("push").WithMessage("Synchronous delivery only supports push channel");
+
+            RuleFor(x => x.EncryptedFirebaseToken)
+                .NotEmpty().WithMessage("EncryptedFirebaseToken is required for synchronous push notifications");
+        });
+
+        When(x => x.Channel == "email", () =>
+        {
+            RuleFor(x => x.EncryptedEmail)
+                .NotEmpty().WithMessage("EncryptedEmail is required for email channel");
+        });
+
+        When(x => x.Channel == "sms", () =>
+        {
+            RuleFor(x => x.EncryptedPhoneNumber)
+                .NotEmpty().WithMessage("EncryptedPhoneNumber is required for SMS channel");
+        });
+    }
+
+    private bool BeValidGuid(string? value) => 
+        !string.IsNullOrEmpty(value) && Guid.TryParse(value, out _);
+
+    private bool BeValidChannel(string? channel) =>
+        new[] { "push", "sms", "email", "inApp" }.Contains(channel?.ToLower());
+
+    private bool BeValidPriority(string? priority) =>
+        new[] { "high", "normal", "low" }.Contains(priority?.ToLower());
+
+    private bool BeValidServiceOrigin(string? origin) =>
+        new[] { "auth", "orders", "ridesharing", "products", "system" }.Contains(origin?.ToLower());
+}
+```
+
+---
+
+### 8.3. Validation Filter Attribute
+
+```csharp
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.Filters;
+
+namespace Listo.Notification.API.Filters;
+
+public class ValidateModelStateAttribute : ActionFilterAttribute
+{
+    public override void OnActionExecuting(ActionExecutingContext context)
+    {
+        if (!context.ModelState.IsValid)
+        {
+            var errors = context.ModelState
+                .Where(e => e.Value?.Errors.Count > 0)
+                .ToDictionary(
+                    kvp => kvp.Key,
+                    kvp => kvp.Value?.Errors.Select(e => e.ErrorMessage).ToArray() ?? Array.Empty<string>()
+                );
+
+            var response = new ApiErrorResponse
+            {
+                Success = false,
+                Error = "ValidationError",
+                Message = "One or more validation errors occurred",
+                ValidationErrors = errors,
+                TraceId = context.HttpContext.TraceIdentifier
+            };
+
+            context.Result = new BadRequestObjectResult(response);
+        }
+    }
+}
+```
+
+**Usage:**
+```csharp
+[HttpPost]
+[ValidateModelState]
+public async Task<IActionResult> SendNotification([FromBody] SendNotificationRequest request)
+{
+    // Request is guaranteed to be valid here
+}
+```
+
+---
+
+### 8.4. Custom Exception Types
+
+```csharp
+namespace Listo.Notification.Application.Exceptions;
+
+public class NotificationException : Exception
+{
+    public string ErrorCode { get; }
+    public Dictionary<string, object>? Metadata { get; }
+
+    public NotificationException(string message, string errorCode) 
+        : base(message)
+    {
+        ErrorCode = errorCode;
+    }
+
+    public NotificationException(string message, string errorCode, Dictionary<string, object>? metadata) 
+        : base(message)
+    {
+        ErrorCode = errorCode;
+        Metadata = metadata;
+    }
+}
+
+public class ResourceNotFoundException : NotificationException
+{
+    public ResourceNotFoundException(string resourceType, string resourceId)
+        : base($"{resourceType} with ID '{resourceId}' was not found", "RESOURCE_NOT_FOUND")
+    {
+        Metadata = new Dictionary<string, object>
+        {
+            ["resourceType"] = resourceType,
+            ["resourceId"] = resourceId
+        };
+    }
+}
+
+public class RateLimitExceededException : NotificationException
+{
+    public RateLimitExceededException(string userId, string channel, int limit, int windowSeconds)
+        : base($"Rate limit exceeded for user {userId} on {channel} channel", "RATE_LIMIT_EXCEEDED")
+    {
+        Metadata = new Dictionary<string, object>
+        {
+            ["userId"] = userId,
+            ["channel"] = channel,
+            ["limit"] = limit,
+            ["windowSeconds"] = windowSeconds,
+            ["retryAfter"] = DateTime.UtcNow.AddSeconds(windowSeconds)
+        };
+    }
+}
+
+public class BudgetExceededException : NotificationException
+{
+    public BudgetExceededException(string serviceOrigin, string channel, decimal currentCost, decimal budget)
+        : base($"Budget exceeded for {serviceOrigin} service on {channel} channel", "BUDGET_EXCEEDED")
+    {
+        Metadata = new Dictionary<string, object>
+        {
+            ["serviceOrigin"] = serviceOrigin,
+            ["channel"] = channel,
+            ["currentCost"] = currentCost,
+            ["budget"] = budget
+        };
+    }
+}
+
+public class ProviderException : NotificationException
+{
+    public string Provider { get; }
+
+    public ProviderException(string provider, string message, string errorCode)
+        : base($"{provider} error: {message}", errorCode)
+    {
+        Provider = provider;
+        Metadata = new Dictionary<string, object>
+        {
+            ["provider"] = provider
+        };
+    }
+}
+```
+
+---
+
+### 8.5. Enhanced Exception Handling Middleware
+
+```csharp
+using System.Net;
+using System.Text.Json;
+using Listo.Notification.Application.Exceptions;
+using Listo.Notification.API.Models.Responses;
+
+namespace Listo.Notification.API.Middleware;
+
+public class ExceptionHandlingMiddleware
+{
+    private readonly RequestDelegate _next;
+    private readonly ILogger<ExceptionHandlingMiddleware> _logger;
+    private readonly IHostEnvironment _environment;
+
+    public ExceptionHandlingMiddleware(
+        RequestDelegate next,
+        ILogger<ExceptionHandlingMiddleware> logger,
+        IHostEnvironment environment)
+    {
+        _next = next;
+        _logger = logger;
+        _environment = environment;
+    }
+
+    public async Task InvokeAsync(HttpContext context)
+    {
+        try
+        {
+            await _next(context);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, 
+                "Unhandled exception occurred. Path: {Path}, TraceId: {TraceId}",
+                context.Request.Path,
+                context.TraceIdentifier);
+            
+            await HandleExceptionAsync(context, ex);
+        }
+    }
+
+    private async Task HandleExceptionAsync(HttpContext context, Exception exception)
+    {
+        var (statusCode, errorCode, message, metadata) = exception switch
+        {
+            ResourceNotFoundException ex => (
+                HttpStatusCode.NotFound,
+                ex.ErrorCode,
+                ex.Message,
+                ex.Metadata
+            ),
+            RateLimitExceededException ex => (
+                HttpStatusCode.TooManyRequests,
+                ex.ErrorCode,
+                ex.Message,
+                ex.Metadata
+            ),
+            BudgetExceededException ex => (
+                HttpStatusCode.PaymentRequired,
+                ex.ErrorCode,
+                ex.Message,
+                ex.Metadata
+            ),
+            ProviderException ex => (
+                HttpStatusCode.BadGateway,
+                ex.ErrorCode,
+                ex.Message,
+                ex.Metadata
+            ),
+            NotificationException ex => (
+                HttpStatusCode.BadRequest,
+                ex.ErrorCode,
+                ex.Message,
+                ex.Metadata
+            ),
+            UnauthorizedAccessException => (
+                HttpStatusCode.Unauthorized,
+                "UNAUTHORIZED",
+                "You are not authorized to perform this action",
+                null
+            ),
+            ArgumentException ex => (
+                HttpStatusCode.BadRequest,
+                "INVALID_ARGUMENT",
+                ex.Message,
+                null
+            ),
+            _ => (
+                HttpStatusCode.InternalServerError,
+                "INTERNAL_SERVER_ERROR",
+                _environment.IsDevelopment() 
+                    ? exception.Message 
+                    : "An unexpected error occurred. Please try again later.",
+                null
+            )
+        };
+
+        var response = new ApiErrorResponse
+        {
+            Success = false,
+            Error = errorCode,
+            Message = message,
+            TraceId = context.TraceIdentifier
+        };
+
+        // Add metadata if available
+        if (metadata != null && _environment.IsDevelopment())
+        {
+            response.ValidationErrors = metadata.ToDictionary(
+                kvp => kvp.Key,
+                kvp => new[] { kvp.Value.ToString() ?? string.Empty }
+            );
+        }
+
+        // Add stack trace in development
+        if (_environment.IsDevelopment())
+        {
+            response.ValidationErrors ??= new Dictionary<string, string[]>();
+            response.ValidationErrors["stackTrace"] = new[] { exception.StackTrace ?? "N/A" };
+        }
+
+        // Set retry-after header for rate limit errors
+        if (exception is RateLimitExceededException rateLimitEx && 
+            rateLimitEx.Metadata?.ContainsKey("retryAfter") == true)
+        {
+            var retryAfter = (DateTime)rateLimitEx.Metadata["retryAfter"];
+            var retryAfterSeconds = (int)(retryAfter - DateTime.UtcNow).TotalSeconds;
+            context.Response.Headers.Add("Retry-After", retryAfterSeconds.ToString());
+            context.Response.Headers.Add("X-RateLimit-Reset", 
+                new DateTimeOffset(retryAfter).ToUnixTimeSeconds().ToString());
+        }
+
+        context.Response.ContentType = "application/json";
+        context.Response.StatusCode = (int)statusCode;
+
+        var json = JsonSerializer.Serialize(response, new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+        });
+        
+        await context.Response.WriteAsync(json);
+    }
+}
+```
+
+---
+
+### 8.6. Result Pattern Implementation
+
+```csharp
+namespace Listo.Notification.Application.Common;
+
+public class Result
+{
+    public bool IsSuccess { get; protected set; }
+    public string Message { get; protected set; } = string.Empty;
+    public string Error { get; protected set; } = string.Empty;
+    public ErrorType ErrorType { get; protected set; }
+    public Dictionary<string, string[]>? ValidationErrors { get; protected set; }
+
+    protected Result(bool isSuccess, string message, string error, ErrorType errorType)
+    {
+        IsSuccess = isSuccess;
+        Message = message;
+        Error = error;
+        ErrorType = errorType;
+    }
+
+    public static Result Success(string message = "") =>
+        new Result(true, message, string.Empty, ErrorType.None);
+
+    public static Result Failure(string error, string message, ErrorType errorType = ErrorType.Failure) =>
+        new Result(false, message, error, errorType);
+
+    public static Result NotFound(string message) =>
+        new Result(false, message, "NOT_FOUND", ErrorType.NotFound);
+
+    public static Result Unauthorized(string message) =>
+        new Result(false, message, "UNAUTHORIZED", ErrorType.Unauthorized);
+
+    public static Result ValidationError(Dictionary<string, string[]> errors) =>
+        new Result(false, "Validation failed", "VALIDATION_ERROR", ErrorType.Validation)
+        {
+            ValidationErrors = errors
+        };
+}
+
+public class Result<T> : Result
+{
+    public T? Value { get; private set; }
+
+    private Result(bool isSuccess, T? value, string message, string error, ErrorType errorType)
+        : base(isSuccess, message, error, errorType)
+    {
+        Value = value;
+    }
+
+    public static Result<T> Success(T value, string message = "") =>
+        new Result<T>(true, value, message, string.Empty, ErrorType.None);
+
+    public new static Result<T> Failure(string error, string message, ErrorType errorType = ErrorType.Failure) =>
+        new Result<T>(false, default, message, error, errorType);
+
+    public new static Result<T> NotFound(string message) =>
+        new Result<T>(false, default, message, "NOT_FOUND", ErrorType.NotFound);
+}
+
+public enum ErrorType
+{
+    None,
+    Failure,
+    NotFound,
+    Validation,
+    Unauthorized,
+    Conflict
+}
+```
+
+---
+
+### 8.7. Validation Summary
+
+**Validation Layers:**
+1. **Request DTOs:** DataAnnotations for basic validation
+2. **FluentValidation:** Complex business rules and cross-field validation
+3. **Service Layer:** Domain-specific validation (e.g., user exists, template valid)
+4. **Database Constraints:** Enforce data integrity at database level
+
+**Error Response Format:**
+```json
+{
+  "success": false,
+  "error": "VALIDATION_ERROR",
+  "message": "One or more validation errors occurred",
+  "validationErrors": {
+    "userId": ["UserId is required"],
+    "channel": ["Channel must be push, sms, email, or inApp"],
+    "templateKey": ["TemplateKey must be lowercase alphanumeric with underscores"]
+  },
+  "traceId": "00-abc123-def456-00"
+}
+```
+
+**Rate Limit Error Response:**
+```json
+{
+  "success": false,
+  "error": "RATE_LIMIT_EXCEEDED",
+  "message": "Rate limit exceeded for user user-123 on push channel",
+  "traceId": "00-abc123-def456-00"
+}
+```
+
+**Response Headers:**
+```http
+Retry-After: 3600
+X-RateLimit-Limit: 60
+X-RateLimit-Remaining: 0
+X-RateLimit-Reset: 1705392000
+```
+
+---
+
+## 9. Notification Sending Integrations
 
 - **Push:** Integrate with Firebase Cloud Messaging (FCM).
 - **SMS:** Integrate with Twilio SDK.
