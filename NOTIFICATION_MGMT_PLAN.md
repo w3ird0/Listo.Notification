@@ -6758,35 +6758,1984 @@ app.MapHealthChecks("/health/ready", new HealthCheckOptions
 
 ## 16. Documentation
 
-- **Swagger/OpenAPI:** Use Swashbuckle to generate and expose API docs.
-- **README:** Document setup, environment variables, and deployment steps.
+This section provides comprehensive API documentation, integration guides, and consumer best practices for the Listo.Notification service.
+
+---
+
+### 16.1. Swagger/OpenAPI Configuration
+
+**Versioned Documentation:**
+
+The Notification API exposes OpenAPI v3 documentation at `/swagger/v1/swagger.json` with an interactive UI at `/swagger`. The API follows semantic versioning with all endpoints prefixed with `/api/v1`.
+
+**Program.cs Configuration:**
+
+```csharp
+using Microsoft.OpenApi.Models;
+using Swashbuckle.AspNetCore.Filters;
+
+// Add Swagger/OpenAPI support
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen(c =>
+{
+    c.SwaggerDoc("v1", new OpenApiInfo 
+    { 
+        Title = "Listo.Notification API", 
+        Version = "v1",
+        Description = "Multi-channel notification and messaging service for the ListoExpress ecosystem",
+        Contact = new OpenApiContact
+        {
+            Name = "ListoExpress Platform Team",
+            Email = "platform@listoexpress.com"
+        }
+    });
+    
+    // Enable XML comments
+    c.EnableAnnotations();
+    c.CustomSchemaIds(t => t.FullName);
+    var xmlFile = $"{Assembly.GetExecutingAssembly().GetName().Name}.xml";
+    var xmlPath = Path.Combine(AppContext.BaseDirectory, xmlFile);
+    if (File.Exists(xmlPath))
+    {
+        c.IncludeXmlComments(xmlPath, includeControllerXmlComments: true);
+    }
+
+    // Security definitions
+    c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme 
+    {
+        Name = "Authorization",
+        Type = SecuritySchemeType.Http,
+        Scheme = "bearer",
+        BearerFormat = "JWT",
+        In = ParameterLocation.Header,
+        Description = "JWT Authorization header using the Bearer scheme. Issued by Listo.Auth service."
+    });
+    
+    c.AddSecurityDefinition("ApiKey", new OpenApiSecurityScheme 
+    {
+        Name = "X-Api-Key",
+        Type = SecuritySchemeType.ApiKey,
+        In = ParameterLocation.Header,
+        Description = "API key for approved partner integrations or internal service-to-service calls."
+    });
+
+    // Global security requirements
+    c.AddSecurityRequirement(new OpenApiSecurityRequirement 
+    {
+        {
+            new OpenApiSecurityScheme 
+            { 
+                Reference = new OpenApiReference 
+                { 
+                    Type = ReferenceType.SecurityScheme, 
+                    Id = "Bearer" 
+                } 
+            }, 
+            Array.Empty<string>()
+        },
+        {
+            new OpenApiSecurityScheme 
+            { 
+                Reference = new OpenApiReference 
+                { 
+                    Type = ReferenceType.SecurityScheme, 
+                    Id = "ApiKey" 
+                } 
+            }, 
+            Array.Empty<string>()
+        }
+    });
+
+    // Operation filters for required headers
+    c.OperationFilter<CorrelationAndIdempotencyHeadersOperationFilter>();
+    c.OperationFilter<RateLimitHeadersOperationFilter>();
+    c.OperationFilter<TenantIdHeaderOperationFilter>();
+    
+    // Example filters (optional)
+    c.ExampleFilters();
+});
+
+// Register example providers
+builder.Services.AddSwaggerExamplesFromAssemblyOf<Program>();
+
+// Configure Swagger UI
+builder.Services.AddSwaggerGenNewtonsoftSupport();
+
+// In app configuration
+if (app.Environment.IsDevelopment() || app.Configuration.GetValue<bool>("Features:EnableSwaggerInProduction"))
+{
+    app.UseSwagger();
+    app.UseSwaggerUI(c =>
+    {
+        c.SwaggerEndpoint("/swagger/v1/swagger.json", "Listo.Notification API v1");
+        c.RoutePrefix = "swagger";
+        c.DisplayRequestDuration();
+        c.EnableDeepLinking();
+        c.EnableFilter();
+        c.ShowExtensions();
+        
+        // Require authentication in production
+        if (!app.Environment.IsDevelopment())
+        {
+            c.ConfigObject.AdditionalItems.Add("persistAuthorization", "true");
+        }
+    });
+}
+```
+
+**Environment-Specific Configuration:**
+
+```json
+// appsettings.Development.json
+{
+  "Features": {
+    "EnableSwaggerInProduction": false
+  }
+}
+
+// appsettings.Production.json (only enable with authentication)
+{
+  "Features": {
+    "EnableSwaggerInProduction": false  // Set to true only for authenticated internal access
+  }
+}
+```
+
+---
+
+### 16.2. API Conventions
+
+**Base Path:**
+- All API endpoints are prefixed with `/api/v1`
+- Example: `POST /api/v1/notifications`, `GET /api/v1/templates`
+
+**Resource Naming:**
+- Use lowercase with hyphen-separated segments
+- Examples: `/notification-preferences`, `/batch-operations`, `/cost-tracking`
+
+**JSON Payload:**
+- Use camelCase for all property names
+- Example: `{ "userId": "123", "templateKey": "order-confirmation", "scheduledAt": "2025-10-20T18:00:00Z" }`
+
+**Standard Headers:**
+
+| Header | Required | Description |
+|--------|----------|-------------|
+| `Authorization: Bearer <token>` | Yes* | JWT token issued by Listo.Auth |
+| `X-Api-Key` | No | Alternative authentication for approved integrations |
+| `X-Correlation-Id` | Recommended | Request correlation ID (auto-generated if omitted) |
+| `X-Tenant-Id` | Yes** | Tenant identifier for multi-tenancy scoping |
+| `Idempotency-Key` | Yes*** | UUID v4 for idempotent POST operations |
+| `Accept-Language` | No | Locale preference (e.g., `en-US`, `fr-CA`) |
+
+*Either `Authorization` or `X-Api-Key` required  
+**Required unless resolved from JWT `tenantId` claim  
+***Required for POST operations that create/send notifications
+
+**Idempotency:**
+
+- **Key Format:** UUID v4 (e.g., `550e8400-e29b-41d4-a716-446655440000`)
+- **TTL:** 24 hours
+- **Scope:** Per tenant + endpoint + request body hash
+- **Behavior:** Replayed requests return the original response with HTTP status 200/201/202
+- **Replay Header:** Response includes `Idempotency-Replayed: true`
+
+Example:
+```http
+POST /api/v1/notifications
+Authorization: Bearer eyJ...
+X-Tenant-Id: acme-co
+Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000
+X-Correlation-Id: trace-abc-123
+
+{ "channel": "email", "templateKey": "order-confirmation", ... }
+```
+
+**Pagination:**
+
+- **Strategy:** Cursor-based pagination
+- **Default Page Size:** 50 (maximum: 200)
+- **Query Parameters:**
+  - `pageSize`: Number of results per page (default: 50, max: 200)
+  - `cursor`: Base64-encoded cursor for next page
+
+Example:
+```http
+GET /api/v1/notifications?tenantId=acme-co&pageSize=50&cursor=eyJpZCI6MTIzLCJkYXRlIjoiMjAyNS0wMS0yMCJ9
+
+Response:
+{
+  "data": [ ... ],
+  "pagination": {
+    "pageSize": 50,
+    "hasMore": true,
+    "nextCursor": "eyJpZCI6MTczLCJkYXRlIjoiMjAyNS0wMS0yMSJ9"
+  }
+}
+```
+
+**Error Model:**
+
+All errors follow a consistent JSON structure with appropriate HTTP status codes:
+
+```json
+{
+  "error": {
+    "code": "rate_limit_exceeded",
+    "message": "Too many requests. Please retry after the specified time.",
+    "traceId": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+    "timestamp": "2025-10-20T18:00:00Z",
+    "details": [
+      {
+        "field": "to.phoneNumber",
+        "issue": "invalid_format",
+        "message": "Phone number must be in E.164 format"
+      }
+    ]
+  }
+}
+```
+
+**Standard HTTP Status Codes:**
+
+- `200 OK`: Successful GET/PUT/PATCH
+- `201 Created`: Resource created
+- `202 Accepted`: Request accepted for asynchronous processing
+- `204 No Content`: Successful DELETE
+- `400 Bad Request`: Invalid request payload
+- `401 Unauthorized`: Missing or invalid authentication
+- `403 Forbidden`: Insufficient permissions
+- `404 Not Found`: Resource not found
+- `409 Conflict`: Idempotency key conflict or duplicate resource
+- `429 Too Many Requests`: Rate limit exceeded (includes `Retry-After` header)
+- `500 Internal Server Error`: Unexpected server error
+- `503 Service Unavailable`: Service temporarily unavailable
+
+---
+
+### 16.3. Endpoint Examples
+
+**POST /api/v1/notifications - Send Notification**
+
+Queues a notification for delivery via the specified channel.
+
+```http
+POST /api/v1/notifications
+Content-Type: application/json
+Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...
+X-Tenant-Id: acme-co
+Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000
+X-Correlation-Id: order-12345
+
+{
+  "channel": "email",
+  "templateKey": "order-confirmation",
+  "to": {
+    "email": "customer@example.com",
+    "userId": "user-789"
+  },
+  "data": {
+    "orderId": "ord_12345",
+    "orderNumber": "ORD-2025-001",
+    "total": 149.99,
+    "currency": "USD",
+    "items": 3
+  },
+  "priority": "normal",
+  "scheduleAt": null
+}
+```
+
+**Response (202 Accepted):**
+```json
+{
+  "id": "ntf_abc123def456",
+  "status": "queued",
+  "channel": "email",
+  "scheduledAt": null,
+  "createdAt": "2025-10-20T18:00:00Z"
+}
+```
+
+**GET /api/v1/notifications/{id} - Get Notification Status**
+
+```http
+GET /api/v1/notifications/ntf_abc123def456
+Authorization: Bearer eyJ...
+X-Tenant-Id: acme-co
+
+Response (200 OK):
+{
+  "id": "ntf_abc123def456",
+  "tenantId": "acme-co",
+  "channel": "email",
+  "status": "delivered",
+  "templateKey": "order-confirmation",
+  "to": {
+    "email": "customer@example.com",
+    "userId": "user-789"
+  },
+  "priority": "normal",
+  "createdAt": "2025-10-20T18:00:00Z",
+  "sentAt": "2025-10-20T18:00:15Z",
+  "deliveredAt": "2025-10-20T18:00:22Z",
+  "providerMessageId": "sg_msg_abc123"
+}
+```
+
+**GET /api/v1/notifications - List Notifications**
+
+```http
+GET /api/v1/notifications?tenantId=acme-co&status=delivered&channel=email&pageSize=50
+Authorization: Bearer eyJ...
+
+Response (200 OK):
+{
+  "data": [
+    {
+      "id": "ntf_abc123",
+      "channel": "email",
+      "status": "delivered",
+      "createdAt": "2025-10-20T18:00:00Z"
+    }
+  ],
+  "pagination": {
+    "pageSize": 50,
+    "hasMore": false,
+    "nextCursor": null
+  }
+}
+```
+
+**POST /api/v1/notification-preferences - Create/Update Preferences**
+
+```http
+POST /api/v1/notification-preferences
+Authorization: Bearer eyJ...
+X-Tenant-Id: acme-co
+
+{
+  "userId": "user-789",
+  "email": {
+    "enabled": true,
+    "marketing": false,
+    "transactional": true
+  },
+  "sms": {
+    "enabled": true,
+    "marketing": false,
+    "transactional": true
+  },
+  "push": {
+    "enabled": true
+  },
+  "quietHours": {
+    "enabled": true,
+    "start": "22:00",
+    "end": "08:00",
+    "timezone": "America/New_York"
+  },
+  "locale": "en-US"
+}
+```
+
+**POST /api/v1/templates/render - Preview Template (No Send)**
+
+```http
+POST /api/v1/templates/render
+Authorization: Bearer eyJ...
+X-Tenant-Id: acme-co
+
+{
+  "templateKey": "order-confirmation",
+  "channel": "email",
+  "locale": "en-US",
+  "data": {
+    "orderId": "ord_12345",
+    "total": 149.99
+  }
+}
+
+Response (200 OK):
+{
+  "subject": "Order Confirmation - ORD-2025-001",
+  "body": "<html>...",
+  "previewText": "Your order has been confirmed"
+}
+```
+
+---
+
+### 16.4. Service Integration Guides
+
+**Listo.Auth Integration:**
+
+The Notification service relies on Listo.Auth for JWT-based authentication and authorization.
+
+**Required JWT Scopes:**
+- `notifications:send` - Send notifications
+- `notifications:read` - Read notification status and history
+- `notifications:admin` - Admin operations (budgets, rate limits, templates)
+
+**JWT Claims Used:**
+- `sub`: User ID
+- `tenantId`: Tenant identifier
+- `scope`: Space-separated list of granted scopes
+- `role`: User role (customer, driver, support, admin)
+
+**SignalR Authentication:**
+
+For SignalR connections, pass the JWT token via query string:
+```javascript
+const connection = new signalR.HubConnectionBuilder()
+  .withUrl("/hubs/messaging", {
+    accessTokenFactory: () => getAccessToken()
+  })
+  .build();
+```
+
+**Configuration:**
+
+See [`docs/AUTHENTICATION_CONFIGURATION.md`](./docs/AUTHENTICATION_CONFIGURATION.md) for detailed authority, issuer, and clock skew settings.
+
+**Listo.Orders and Listo.RideSharing Integration:**
+
+Two integration patterns are supported:
+
+**1. Direct API Integration (Synchronous)**
+
+For time-sensitive notifications (e.g., driver assignment), services can call the Notification API directly:
+
+```http
+POST /api/v1/notifications
+X-Service-Secret: {secret_from_keyvault}
+X-Tenant-Id: acme-co
+Idempotency-Key: orders-driver-assign-{orderId}
+X-Correlation-Id: {traceId}
+
+{
+  "userId": "driver-456",
+  "channel": "push",
+  "templateKey": "driver_assignment",
+  "priority": "high",
+  "synchronous": true,
+  "data": {
+    "orderId": "ord_12345",
+    "customerName": "John Doe",
+    "pickupAddress": "123 Main St"
+  }
+}
+```
+
+**2. Asynchronous via Azure Service Bus (Recommended)**
+
+Services publish domain events to Azure Service Bus. The Notification service subscribes and automatically routes notifications based on event mappings.
+
+**Event Mapping Example:**
+
+See [`docs/SERVICE_EVENT_MAPPINGS.md`](./docs/SERVICE_EVENT_MAPPINGS.md) for complete event-to-notification mappings including:
+- `com.listo.orders.order-created` → `order_confirmation` template
+- `com.listo.ridesharing.driver-assigned` → `driver_assignment` template
+- `com.listo.auth.password-reset-requested` → `password_reset` template
+
+---
+
+### 16.5. Azure Service Bus Message Format (CloudEvents 1.0)
+
+**CloudEvents Specification:**
+
+All Service Bus messages MUST use [CloudEvents 1.0](https://github.com/cloudevents/spec/blob/v1.0/spec.md) with JSON content mode.
+
+**Required Attributes:**
+- `specversion`: "1.0"
+- `id`: Unique event ID (UUID)
+- `source`: Event source URI (e.g., "listo.orders/tenants/acme-co")
+- `type`: Event type (reverse DNS notation)
+- `subject`: Resource subject (e.g., "orders/ord_12345")
+- `time`: Event timestamp (ISO 8601)
+- `datacontenttype`: "application/json"
+- `data`: Event payload
+
+**Example - Order Created Event:**
+
+```json
+{
+  "specversion": "1.0",
+  "id": "evt-550e8400-e29b-41d4-a716-446655440000",
+  "source": "listo.orders/tenants/acme-co",
+  "type": "com.listo.orders.order-created",
+  "subject": "orders/ord_12345",
+  "time": "2025-10-20T18:00:00Z",
+  "datacontenttype": "application/json",
+  "data": {
+    "orderId": "ord_12345",
+    "userId": "user-789",
+    "total": 149.99,
+    "currency": "USD",
+    "items": [
+      {
+        "productId": "prod-123",
+        "quantity": 2,
+        "price": 49.99
+      }
+    ]
+  },
+  "extensions": {
+    "tenantid": "acme-co",
+    "correlationid": "order-trace-12345"
+  }
+}
+```
+
+**Service Bus Mapping:**
+
+- **Message Body:** Complete CloudEvent JSON
+- **ApplicationProperties:** Mirror extensions for filtering
+  - `tenantid`: "acme-co"
+  - `correlationid": "order-trace-12345"
+  - `eventtype`: "com.listo.orders.order-created"
+
+**Outgoing Notification Lifecycle Events:**
+
+The Notification service publishes lifecycle events back to Service Bus:
+
+- `com.listo.notification.dispatched` - Notification sent to provider
+- `com.listo.notification.delivered` - Confirmed delivery
+- `com.listo.notification.failed` - Permanent failure after retries
+
+See [`docs/SERVICE_EVENT_MAPPINGS.md`](./docs/SERVICE_EVENT_MAPPINGS.md) for complete schemas.
+
+---
+
+### 16.6. Rate Limiting and Cost Management (Consumer Guide)
+
+**Per-Tenant Budgets:**
+
+Each tenant has configurable budgets with currency tracking:
+- Monthly budget limits per service (Orders, RideSharing, etc.)
+- Per-channel quotas (email, SMS, push, in-app)
+- Budget alerts at 80% and 100% thresholds
+
+**Default Quotas (Example - Confirm per Tenant):**
+
+| Channel | Daily Limit | Burst Capacity |
+|---------|-------------|----------------|
+| Email | 10,000 | 200 |
+| SMS | 2,000 | 50 |
+| Push | 50,000 | 500 |
+| In-App | 100,000 | 1,000 |
+
+**Rate Limit Headers:**
+
+All API responses include rate limit information:
+
+```http
+HTTP/1.1 200 OK
+X-RateLimit-Limit: 1000
+X-RateLimit-Remaining: 847
+X-RateLimit-Reset: 1647878400
+X-RateLimit-Policy: tenant-level
+```
+
+**Rate Limit Exceeded (429):**
+
+```http
+HTTP/1.1 429 Too Many Requests
+Retry-After: 60
+X-RateLimit-Limit: 1000
+X-RateLimit-Remaining: 0
+X-RateLimit-Reset: 1647878400
+
+{
+  "error": {
+    "code": "rate_limit_exceeded",
+    "message": "Rate limit exceeded. Please retry after 60 seconds.",
+    "retryAfter": 60
+  }
+}
+```
+
+**OTP SMS Retry Policy Example:**
+
+- Window: 10 minutes
+- Max Attempts: 3
+- Cooldown: 60 seconds between attempts
+
+**Budget Enforcement:**
+
+- Alerts triggered at 80% and 100% of monthly budget
+- After 100%, only high-priority notifications allowed
+- Admin override available via `/api/v1/admin/budgets/{tenantId}/override`
+
+For detailed cost management and admin APIs, see [`docs/COST_MANAGEMENT_RATE_LIMITING.md`](./docs/COST_MANAGEMENT_RATE_LIMITING.md).
+
+---
+
+### 16.7. Template Usage and Localization
+
+**Template Resolution Order:**
+
+1. Explicit `templateKey` + `locale` (e.g., `order_confirmation.fr-CA`)
+2. `templateKey` + default locale (e.g., `order_confirmation.en`)
+3. Global default template
+
+**Placeholder Syntax:**
+
+```handlebars
+Hello {{user.firstName}},
+
+Your order #{{order.orderNumber}} totaling {{order.total}} {{order.currency}} has been confirmed.
+
+{{#if order.estimatedDelivery}}
+Estimated delivery: {{order.estimatedDelivery}}
+{{/if}}
+```
+
+**Supported Features:**
+- Dot notation for nested properties: `{{order.customer.name}}`
+- Default values: `{{user.firstName | "valued customer"}}`
+- Conditional blocks: `{{#if condition}}...{{/if}}`
+- Loops: `{{#each items}}{{name}}{{/each}}`
+
+**Localization:**
+
+**Locale Resolution:**
+1. Explicit `locale` in request payload
+2. `Accept-Language` header
+3. User preference from database
+4. Tenant default locale
+5. System default (`en-US`)
+
+**Fallback Chain:**
+```
+fr-CA → fr → en → system default
+```
+
+**HTML Sanitization (Email Templates):**
+
+- Allowlist: `<p>`, `<br>`, `<a>`, `<strong>`, `<em>`, `<ul>`, `<li>`, `<table>`, `<tr>`, `<td>`
+- Strip `<script>`, `<iframe>`, `<form>` tags
+- Sanitize `href` and `src` attributes (allow https:// only)
+
+**Variable Safety:**
+
+- Null-safe substitution with defaults
+- HTML encoding for email content
+- Plain text encoding for SMS
+
+---
+
+### 16.8. Webhook Configuration for Providers
+
+**Twilio (SMS) Webhook:**
+
+**Endpoint:** `POST /api/v1/providers/twilio/webhook`
+
+**Signature Validation:**
+
+Twilio signs requests with `X-Twilio-Signature`. Validate using:
+
+```csharp
+var validator = new RequestValidator(twilioAuthToken);
+var isValid = validator.Validate(
+    requestUrl,
+    request.Form.ToDictionary(k => k.Key, v => v.Value.ToString()),
+    request.Headers["X-Twilio-Signature"]
+);
+```
+
+**Events Mapped:**
+- `queued` → NotificationStatus.Queued
+- `sent` → NotificationStatus.Sent
+- `delivered` → NotificationStatus.Delivered
+- `undelivered` → NotificationStatus.Failed
+- `failed` → NotificationStatus.Failed
+
+**Twilio Console Configuration:**
+1. Navigate to Phone Numbers → Active Numbers
+2. Select your number
+3. Under "Messaging", set Webhook URL:
+   - `https://notification.listoexpress.com/api/v1/providers/twilio/webhook`
+4. HTTP Method: `POST`
+
+---
+
+**SendGrid (Email) Webhook:**
+
+**Endpoint:** `POST /api/v1/providers/sendgrid/webhook`
+
+**Signature Validation:**
+
+Enable signed event webhooks in SendGrid and validate:
+
+```csharp
+var publicKey = await keyVaultClient.GetSecretAsync("SendGridWebhookPublicKey");
+var signature = request.Headers["X-Twilio-Email-Event-Webhook-Signature"];
+var timestamp = request.Headers["X-Twilio-Email-Event-Webhook-Timestamp"];
+
+var verifier = new SignatureVerifier(publicKey);
+var isValid = verifier.Verify(
+    requestBody,
+    signature,
+    timestamp
+);
+```
+
+**Events Mapped:**
+- `processed` → NotificationStatus.Sent
+- `delivered` → NotificationStatus.Delivered
+- `open` → Update analytics (no status change)
+- `click` → Update analytics
+- `bounce` → NotificationStatus.Failed
+- `dropped` → NotificationStatus.Failed
+- `spamreport` → NotificationStatus.Failed + block recipient
+
+**SendGrid Configuration:**
+1. Settings → Mail Settings → Event Webhook
+2. Enable Event Notifications
+3. HTTP POST URL: `https://notification.listoexpress.com/api/v1/providers/sendgrid/webhook`
+4. Select events: delivered, open, click, bounce, dropped, spamreport
+5. Enable Signed Event Webhook
+
+---
+
+**FCM (Push) Webhook:**
+
+**Endpoint:** `POST /api/v1/providers/fcm/webhook`
+
+**Setup:**
+
+FCM doesn't provide native webhooks. Recommended approach:
+
+1. Create Firebase Cloud Function (HTTP trigger)
+2. Subscribe to FCM events via Firebase Admin SDK
+3. Forward delivery and error events to Notification API
+
+**Cloud Function Example:**
+
+```javascript
+const functions = require('firebase-functions');
+const admin = require('firebase-admin');
+const axios = require('axios');
+
+exports.fcmWebhook = functions.https.onRequest(async (req, res) => {
+  const event = req.body;
+  
+  await axios.post(
+    'https://notification.listoexpress.com/api/v1/providers/fcm/webhook',
+    event,
+    {
+      headers: {
+        'X-Provider-Secret': process.env.NOTIFICATION_API_SECRET,
+        'Content-Type': 'application/json'
+      }
+    }
+  );
+  
+  res.status(200).send('OK');
+});
+```
+
+**Signature Validation:**
+
+Validate `X-Provider-Secret` header against shared secret from Key Vault.
+
+**Events Mapped:**
+- `token-invalid` → Remove device token
+- `canonical-id` → Update device token
+- `device-unregistered` → Remove device token
+
+**Security Note:**
+
+Restrict webhook endpoints by IP where possible:
+- Twilio IPs: https://www.twilio.com/docs/ips
+- SendGrid IPs: https://docs.sendgrid.com/for-developers/tracking-events/getting-started-event-webhook-security#ip-addresses
+- FCM: Use VPC and private endpoints or authenticate with shared secrets
+
+Consider exposing webhooks on a separate subdomain (e.g., `webhooks.listoexpress.com`) with dedicated WAF rules.
 
 ---
 
 ## 17. CI/CD Pipeline
 
-- **Build & Test:** Use GitHub Actions or Azure DevOps for build, test, and lint.
-- **Container Build:** Build and push Docker image on merge to main.
-- **Deploy:** Automate deployment to Azure.
+**Note:** CI/CD implementation is deferred per Phase 5 scope. This section outlines the intended pipeline architecture. See Section 20 for detailed stage definitions.
+
+**Preferred Tool:** GitHub Actions
+
+**Intended Pipeline:**
+- **Build:** Restore dependencies, compile .NET 9, run dotnet format verification
+- **Test:** Unit and integration tests (Section 13 implementation pending)
+- **Security:** Static code analysis (SCA), secret scanning, dependency vulnerability checks
+- **Package:** Publish artifacts, create container images
+- **Deploy:** Deploy to Azure App Service with environment-specific configurations
+
+Implementation will include:
+- Multi-environment support (dev, staging, production)
+- Manual approval gates for production deployments
+- Deployment slots for zero-downtime releases
+- Automated rollback on health check failures
 
 ---
 
 ## 18. Security
 
-- **Secrets:** Store sensitive data in Azure Key Vault.
-- **HTTPS:** Enforce HTTPS in production.
-- **CORS:** Configure allowed origins.
-- **Data Protection:** Encrypt sensitive data at rest and in transit.
-- **Input Validation:** Prevent SQL injection, XSS, and validate file uploads.
+This section provides comprehensive security controls, configurations, and best practices for the Listo.Notification service.
+
+---
+
+### 18.1. Security Checklist (Per Environment)
+
+**Identity and Access:**
+- ✅ Enforce JWT validation with scopes per endpoint category
+- ✅ Implement API key support for trusted partner integrations
+- ✅ Configure managed identity for all Azure resource access
+- ✅ Restrict service-to-service calls with X-Service-Secret validation
+- ✅ Implement least-privilege RBAC for Azure resources
+
+**Data Protection:**
+- ✅ Enable TDE (Transparent Data Encryption) on Azure SQL Database
+- ✅ Implement app-layer field encryption for PII columns (email, phone, device tokens)
+- ✅ Store all secrets in Azure Key Vault (no secrets in code/config)
+- ✅ Encrypt data in transit with TLS 1.2+ only
+- ✅ Implement secure key rotation procedures (quarterly DEK, annual KEK)
+
+**Network Security:**
+- ✅ Enforce HTTPS-only with HSTS headers
+- ✅ Configure App Service IP restrictions or VNet integration
+- ✅ Use private endpoints for Azure SQL, Service Bus, and Redis
+- ✅ Implement NSG rules restricting traffic to required ports only
+- ✅ Deploy Azure Front Door or Application Gateway with WAF
+
+**Application Security:**
+- ✅ Configure strict CORS with explicit allowed origins
+- ✅ Validate all inputs with FluentValidation
+- ✅ Sanitize HTML in email templates (allowlist approach)
+- ✅ Add security headers (CSP, X-Frame-Options, etc.)
+- ✅ Disable detailed error messages in production
+- ✅ Mask PII in application logs
+
+**Process and Governance:**
+- ✅ Document key rotation runbooks
+- ✅ Establish incident response procedures
+- ✅ Configure vulnerability scanning in CI/CD
+- ✅ Schedule regular dependency updates
+- ✅ Conduct quarterly security reviews
+
+---
+
+### 18.2. PII Encryption at Rest
+
+**Envelope Encryption Strategy:**
+
+Use a two-tier key hierarchy for encrypting PII fields (email addresses, phone numbers, device tokens):
+
+1. **Data Encryption Key (DEK):** Per-tenant symmetric key (AES-256-GCM)
+2. **Key Encryption Key (KEK):** Azure Key Vault managed key that wraps DEKs
+
+**Storage Schema:**
+
+```sql
+CREATE TABLE NotificationQueue (
+    Id UNIQUEIDENTIFIER PRIMARY KEY,
+    TenantId NVARCHAR(100) NOT NULL,
+    -- Encrypted PII fields
+    EncryptedEmail VARBINARY(MAX),
+    EmailNonce VARBINARY(12),
+    EmailKeyId NVARCHAR(200),
+    EncryptedPhoneNumber VARBINARY(MAX),
+    PhoneNonce VARBINARY(12),
+    PhoneKeyId NVARCHAR(200),
+    -- Hashed fields for lookup (HMAC-SHA-256)
+    EmailHash AS CONVERT(VARBINARY(32), HASHBYTES('SHA2_256', CONCAT(TenantId, EncryptedEmail))),
+    PhoneHash AS CONVERT(VARBINARY(32), HASHBYTES('SHA2_256', CONCAT(TenantId, EncryptedPhoneNumber))),
+    CreatedAt DATETIME2 NOT NULL DEFAULT GETUTCDATE()
+);
+
+CREATE INDEX IX_NotificationQueue_EmailHash ON NotificationQueue(TenantId, EmailHash);
+CREATE INDEX IX_NotificationQueue_PhoneHash ON NotificationQueue(TenantId, PhoneHash);
+```
+
+**Service Interface:**
+
+```csharp
+public interface IFieldEncryptionService
+{
+    Task<(byte[] ciphertext, byte[] nonce, string keyId)> EncryptAsync(
+        string plaintext, 
+        string tenantId, 
+        CancellationToken cancellationToken = default);
+    
+    Task<string> DecryptAsync(
+        byte[] ciphertext, 
+        byte[] nonce, 
+        string keyId, 
+        string tenantId, 
+        CancellationToken cancellationToken = default);
+    
+    Task<byte[]> ComputeHashAsync(
+        string plaintext, 
+        string tenantId, 
+        CancellationToken cancellationToken = default);
+}
+```
+
+**Implementation Pattern:**
+
+```csharp
+public class FieldEncryptionService : IFieldEncryptionService
+{
+    private readonly IKeyVaultClient _keyVault;
+    private readonly ILogger<FieldEncryptionService> _logger;
+    private readonly ConcurrentDictionary<string, byte[]> _dekCache = new();
+
+    public async Task<(byte[] ciphertext, byte[] nonce, string keyId)> EncryptAsync(
+        string plaintext, 
+        string tenantId, 
+        CancellationToken cancellationToken = default)
+    {
+        // Get or create tenant DEK
+        var dek = await GetOrCreateDekAsync(tenantId, cancellationToken);
+        var keyId = $"tenant-{tenantId}-dek-v1";
+        
+        // Generate random nonce
+        var nonce = new byte[AesGcm.NonceByteSizes.MaxSize];
+        RandomNumberGenerator.Fill(nonce);
+        
+        // Encrypt with AES-GCM
+        var plaintextBytes = Encoding.UTF8.GetBytes(plaintext);
+        var ciphertext = new byte[plaintextBytes.Length];
+        var tag = new byte[AesGcm.TagByteSizes.MaxSize];
+        
+        using var aes = new AesGcm(dek);
+        aes.Encrypt(nonce, plaintextBytes, ciphertext, tag);
+        
+        // Combine ciphertext + tag
+        var result = new byte[ciphertext.Length + tag.Length];
+        Buffer.BlockCopy(ciphertext, 0, result, 0, ciphertext.Length);
+        Buffer.BlockCopy(tag, 0, result, ciphertext.Length, tag.Length);
+        
+        return (result, nonce, keyId);
+    }
+    
+    private async Task<byte[]> GetOrCreateDekAsync(string tenantId, CancellationToken cancellationToken)
+    {
+        var cacheKey = $"dek-{tenantId}";
+        
+        if (_dekCache.TryGetValue(cacheKey, out var cachedDek))
+            return cachedDek;
+        
+        // Load wrapped DEK from Key Vault
+        var wrappedDek = await _keyVault.GetSecretAsync($"tenant-{tenantId}-dek", cancellationToken);
+        
+        if (wrappedDek == null)
+        {
+            // Generate new DEK and wrap with KEK
+            var newDek = new byte[32]; // 256 bits
+            RandomNumberGenerator.Fill(newDek);
+            
+            var kekResult = await _keyVault.WrapKeyAsync("notif-kek", "RSA-OAEP-256", newDek, cancellationToken);
+            await _keyVault.SetSecretAsync($"tenant-{tenantId}-dek", Convert.ToBase64String(kekResult), cancellationToken);
+            
+            _dekCache.TryAdd(cacheKey, newDek);
+            return newDek;
+        }
+        
+        // Unwrap DEK using KEK
+        var wrappedBytes = Convert.FromBase64String(wrappedDek);
+        var unwrappedDek = await _keyVault.UnwrapKeyAsync("notif-kek", "RSA-OAEP-256", wrappedBytes, cancellationToken);
+        
+        _dekCache.TryAdd(cacheKey, unwrappedDek);
+        return unwrappedDek;
+    }
+}
+```
+
+**Lookup Support:**
+
+For finding records by encrypted PII, store deterministic hashes:
+
+```csharp
+public async Task<byte[]> ComputeHashAsync(string plaintext, string tenantId, CancellationToken cancellationToken = default)
+{
+    // Use tenant-specific salt from Key Vault
+    var salt = await GetTenantSaltAsync(tenantId, cancellationToken);
+    
+    using var hmac = new HMACSHA256(salt);
+    var input = Encoding.UTF8.GetBytes($"{tenantId}:{plaintext}");
+    return hmac.ComputeHash(input);
+}
+```
+
+---
+
+### 18.3. Azure Key Vault Integration
+
+**Setup with Managed Identity:**
+
+```bash
+# Create managed identity
+az identity create \
+  --name notif-api-identity \
+  --resource-group rg-listo-notification-prod
+
+# Create Key Vault
+az keyvault create \
+  --name kv-listo-notif-prod \
+  --resource-group rg-listo-notification-prod \
+  --location eastus \
+  --enable-rbac-authorization true
+
+# Grant identity access to Key Vault
+az role assignment create \
+  --role "Key Vault Crypto User" \
+  --assignee <identity-principal-id> \
+  --scope /subscriptions/<sub-id>/resourceGroups/rg-listo-notification-prod/providers/Microsoft.KeyVault/vaults/kv-listo-notif-prod
+
+az role assignment create \
+  --role "Key Vault Secrets User" \
+  --assignee <identity-principal-id> \
+  --scope /subscriptions/<sub-id>/resourceGroups/rg-listo-notification-prod/providers/Microsoft.KeyVault/vaults/kv-listo-notif-prod
+
+# Create KEK
+az keyvault key create \
+  --name notif-kek \
+  --vault-name kv-listo-notif-prod \
+  --protection software \
+  --kty RSA \
+  --size 2048
+```
+
+**App Settings with Key Vault References (Bicep):**
+
+```bicep
+resource appService 'Microsoft.Web/sites@2023-12-01' = {
+  name: 'app-listo-notification-prod'
+  location: location
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: {
+      '${managedIdentity.id}': {}
+    }
+  }
+  properties: {
+    siteConfig: {
+      appSettings: [
+        {
+          name: 'KeyVault__VaultUri'
+          value: keyVault.properties.vaultUri
+        }
+        {
+          name: 'Twilio__AccountSid'
+          value: '@Microsoft.KeyVault(SecretUri=${keyVault.properties.vaultUri}secrets/TwilioAccountSid/)'
+        }
+        {
+          name: 'Twilio__AuthToken'
+          value: '@Microsoft.KeyVault(SecretUri=${keyVault.properties.vaultUri}secrets/TwilioAuthToken/)'
+        }
+        {
+          name: 'SendGrid__ApiKey'
+          value: '@Microsoft.KeyVault(SecretUri=${keyVault.properties.vaultUri}secrets/SendGridApiKey/)'
+        }
+        {
+          name: 'ConnectionStrings__NotificationDb'
+          value: '@Microsoft.KeyVault(SecretUri=${keyVault.properties.vaultUri}secrets/SqlConnectionString/)'
+        }
+      ]
+    }
+  }
+}
+```
+
+---
+
+### 18.4. Key Rotation Procedures
+
+**DEK Rotation (Quarterly):**
+
+```csharp
+public class DekRotationFunction
+{
+    [Function("DekRotation")]
+    public async Task RunAsync(
+        [TimerTrigger("0 0 2 1 */3 *")] TimerInfo timer,  // 2 AM on 1st of every quarter
+        FunctionContext context)
+    {
+        var logger = context.GetLogger<DekRotationFunction>();
+        
+        logger.LogInformation("Starting quarterly DEK rotation");
+        
+        var tenants = await _dbContext.Set<TenantEntity>().ToListAsync();
+        
+        foreach (var tenant in tenants)
+        {
+            try
+            {
+                // Generate new DEK
+                var newDek = new byte[32];
+                RandomNumberGenerator.Fill(newDek);
+                
+                // Wrap with KEK and store
+                var wrappedDek = await _keyVault.WrapKeyAsync("notif-kek", "RSA-OAEP-256", newDek);
+                await _keyVault.SetSecretAsync(
+                    $"tenant-{tenant.Id}-dek-v{tenant.DekVersion + 1}",
+                    Convert.ToBase64String(wrappedDek));
+                
+                // Update tenant DEK version
+                tenant.DekVersion++;
+                tenant.DekRotatedAt = DateTime.UtcNow;
+                
+                // Option 1: Rewrap only (fast - no re-encryption needed)
+                // Option 2: Re-encrypt all PII (slow but more secure)
+                
+                await _dbContext.SaveChangesAsync();
+                
+                logger.LogInformation("DEK rotated for tenant {TenantId}", tenant.Id);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Failed to rotate DEK for tenant {TenantId}", tenant.Id);
+            }
+            
+            // Throttle to avoid overloading Key Vault
+            await Task.Delay(TimeSpan.FromSeconds(5));
+        }
+        
+        logger.LogInformation("DEK rotation complete");
+    }
+}
+```
+
+**KEK Rotation (Annual):**
+
+```bash
+# Create new KEK version
+az keyvault key rotate \
+  --name notif-kek \
+  --vault-name kv-listo-notif-prod
+
+# Verify new version
+az keyvault key show \
+  --name notif-kek \
+  --vault-name kv-listo-notif-prod \
+  --query key.kid
+
+# Rewrap all DEKs with new KEK version (automated function)
+# Old KEK version remains available for 90 days for rollback
+```
+
+**Secret Rotation Runbook:**
+
+1. **Pre-rotation:**
+   - Notify team via Slack/Teams
+   - Take snapshot backup of Key Vault
+   - Verify monitoring alerts are active
+
+2. **Rotation:**
+   - Generate new credentials with provider (Twilio/SendGrid)
+   - Update Key Vault secrets with new values
+   - Test connectivity with new credentials
+
+3. **Post-rotation:**
+   - Monitor error rates for 24 hours
+   - Verify no authentication failures
+   - Deactivate old credentials after validation period
+   - Update audit log
+
+---
+
+### 18.5. JWT Validation and Claims-Based Authorization
+
+**Program.cs Configuration:**
+
+```csharp
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.IdentityModel.Tokens;
+
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        options.Authority = builder.Configuration["Auth:Authority"]; // Listo.Auth URL
+        options.Audience = "listo.notification.api";
+        options.RequireHttpsMetadata = !builder.Environment.IsDevelopment();
+        
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = true,
+            ValidateAudience = true,
+            ValidateLifetime = true,
+            ValidateIssuerSigningKey = true,
+            ClockSkew = TimeSpan.FromMinutes(5),
+            NameClaimType = "sub",
+            RoleClaimType = "role"
+        };
+        
+        // Allow SignalR to pass token via query string
+        options.Events = new JwtBearerEvents
+        {
+            OnMessageReceived = context =>
+            {
+                var accessToken = context.Request.Query["access_token"];
+                var path = context.HttpContext.Request.Path;
+                
+                if (!string.IsNullOrEmpty(accessToken) && path.StartsWithSegments("/hubs"))
+                {
+                    context.Token = accessToken;
+                }
+                
+                return Task.CompletedTask;
+            },
+            OnAuthenticationFailed = context =>
+            {
+                if (context.Exception.GetType() == typeof(SecurityTokenExpiredException))
+                {
+                    context.Response.Headers.Add("Token-Expired", "true");
+                }
+                return Task.CompletedTask;
+            }
+        };
+    });
+
+// Authorization policies
+builder.Services.AddAuthorization(options =>
+{
+    // Scope-based policies
+    options.AddPolicy("notifications:send", policy =>
+        policy.RequireClaim("scope", "notifications:send"));
+    
+    options.AddPolicy("notifications:read", policy =>
+        policy.RequireClaim("scope", "notifications:read"));
+    
+    options.AddPolicy("notifications:admin", policy =>
+        policy.RequireClaim("scope", "notifications:admin"));
+    
+    // Role-based policies
+    options.AddPolicy("AdminOnly", policy =>
+        policy.RequireRole("admin"));
+    
+    options.AddPolicy("SupportOrAdmin", policy =>
+        policy.RequireRole("support", "admin"));
+    
+    // Combined policies
+    options.AddPolicy("ManageTemplates", policy =>
+    {
+        policy.RequireAuthenticatedUser();
+        policy.RequireAssertion(context =>
+            context.User.HasClaim("scope", "notifications:admin") ||
+            context.User.IsInRole("admin"));
+    });
+});
+```
+
+**Custom API Key Authentication Handler:**
+
+```csharp
+public class ApiKeyAuthenticationHandler : AuthenticationHandler<ApiKeyAuthenticationOptions>
+{
+    private readonly IApiKeyValidator _apiKeyValidator;
+    
+    protected override async Task<AuthenticateResult> HandleAuthenticateAsync()
+    {
+        if (!Request.Headers.TryGetValue("X-Api-Key", out var apiKeyHeaderValues))
+        {
+            return AuthenticateResult.NoResult();
+        }
+        
+        var apiKey = apiKeyHeaderValues.FirstOrDefault();
+        if (string.IsNullOrEmpty(apiKey))
+        {
+            return AuthenticateResult.Fail("Invalid API key");
+        }
+        
+        var validationResult = await _apiKeyValidator.ValidateAsync(apiKey);
+        if (!validationResult.IsValid)
+        {
+            return AuthenticateResult.Fail("Invalid API key");
+        }
+        
+        var claims = new[]
+        {
+            new Claim(ClaimTypes.Name, validationResult.ClientId),
+            new Claim("tenantId", validationResult.TenantId),
+            new Claim("scope", string.Join(" ", validationResult.Scopes))
+        };
+        
+        var identity = new ClaimsIdentity(claims, Scheme.Name);
+        var principal = new ClaimsPrincipal(identity);
+        var ticket = new AuthenticationTicket(principal, Scheme.Name);
+        
+        return AuthenticateResult.Success(ticket);
+    }
+}
+```
+
+---
+
+### 18.6. Network Security
+
+**App Service Configuration:**
+
+```bash
+# Enforce HTTPS only
+az webapp update \
+  --resource-group rg-listo-notification-prod \
+  --name app-listo-notification-api-prod \
+  --set httpsOnly=true
+
+# Set minimum TLS version
+az webapp config set \
+  --resource-group rg-listo-notification-prod \
+  --name app-listo-notification-api-prod \
+  --min-tls-version 1.2
+
+# Configure IP restrictions (if not using VNet)
+az webapp config access-restriction add \
+  --resource-group rg-listo-notification-prod \
+  --name app-listo-notification-api-prod \
+  --rule-name AllowFrontDoor \
+  --priority 100 \
+  --action Allow \
+  --service-tag AzureFrontDoor.Backend
+```
+
+**Azure SQL Firewall:**
+
+```bash
+# Restrict to Azure services only
+az sql server firewall-rule create \
+  --resource-group rg-listo-notification-prod \
+  --server sql-listo-notification-prod \
+  --name AllowAzureServices \
+  --start-ip-address 0.0.0.0 \
+  --end-ip-address 0.0.0.0
+
+# For VNet integration, use private endpoint instead
+az network private-endpoint create \
+  --name pe-sql-notification \
+  --resource-group rg-listo-notification-prod \
+  --vnet-name vnet-listo-prod \
+  --subnet subnet-data \
+  --private-connection-resource-id <sql-server-resource-id> \
+  --group-id sqlServer \
+  --connection-name sql-private-connection
+```
+
+**Service Bus and Redis:**
+
+```bash
+# Disable public network access
+az servicebus namespace update \
+  --resource-group rg-listo-notification-prod \
+  --name sb-listo-notification-prod \
+  --public-network-access Disabled
+
+az redis update \
+  --resource-group rg-listo-notification-prod \
+  --name redis-listo-notification-prod \
+  --public-network-access Disabled
+
+# Create private endpoints
+az network private-endpoint create \
+  --name pe-servicebus-notification \
+  --resource-group rg-listo-notification-prod \
+  --vnet-name vnet-listo-prod \
+  --subnet subnet-integration \
+  --private-connection-resource-id <servicebus-resource-id> \
+  --group-id namespace \
+  --connection-name sb-private-connection
+```
+
+---
+
+### 18.7. CORS Configuration
+
+**Program.cs:**
+
+```csharp
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("FrontendCors", builder =>
+    {
+        var allowedOrigins = configuration["Cors:AllowedOrigins"]?.Split(',') 
+            ?? Array.Empty<string>();
+        
+        builder.WithOrigins(allowedOrigins)
+            .AllowAnyHeader()
+            .AllowAnyMethod()
+            .AllowCredentials()
+            .SetIsOriginAllowedToAllowWildcardSubdomains()
+            .WithExposedHeaders(
+                "X-RateLimit-Limit",
+                "X-RateLimit-Remaining",
+                "X-RateLimit-Reset",
+                "Retry-After");
+    });
+});
+
+// Apply CORS before authentication
+app.UseCors("FrontendCors");
+app.UseAuthentication();
+app.UseAuthorization();
+```
+
+**appsettings.json:**
+
+```json
+{
+  "Cors": {
+    "AllowedOrigins": "https://app.listoexpress.com,https://admin.listoexpress.com,https://*.listoexpress.com"
+  }
+}
+```
+
+---
+
+### 18.8. HTTPS/TLS and HSTS
+
+**Program.cs:**
+
+```csharp
+if (!app.Environment.IsDevelopment())
+{
+    app.UseHsts();
+}
+app.UseHttpsRedirection();
+```
+
+**HSTS Configuration:**
+
+```csharp
+builder.Services.AddHsts(options =>
+{
+    options.Preload = true;
+    options.IncludeSubDomains = true;
+    options.MaxAge = TimeSpan.FromDays(365);
+});
+```
+
+---
+
+### 18.9. Input Validation and Sanitization
+
+**FluentValidation Example:**
+
+```csharp
+public class SendNotificationRequestValidator : AbstractValidator<SendNotificationRequest>
+{
+    public SendNotificationRequestValidator()
+    {
+        RuleFor(x => x.Channel)
+            .IsInEnum()
+            .WithMessage("Invalid notification channel");
+        
+        RuleFor(x => x.To.Email)
+            .EmailAddress()
+            .When(x => x.Channel == NotificationChannel.Email)
+            .WithMessage("Invalid email format");
+        
+        RuleFor(x => x.To.PhoneNumber)
+            .Matches(@"^\+[1-9]\d{1,14}$")  // E.164 format
+            .When(x => x.Channel == NotificationChannel.Sms)
+            .WithMessage("Phone number must be in E.164 format (e.g., +12025551234)");
+        
+        RuleFor(x => x.Data)
+            .Must(data => data?.ToString().Length <= 50000)
+            .WithMessage("Template data exceeds maximum size of 50KB");
+    }
+}
+```
+
+**HTML Sanitization for Email Templates:**
+
+```csharp
+public class HtmlSanitizer
+{
+    private static readonly HashSet<string> AllowedTags = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "p", "br", "a", "strong", "em", "b", "i", "u", 
+        "ul", "ol", "li", "table", "tr", "td", "th", "thead", "tbody",
+        "h1", "h2", "h3", "h4", "h5", "h6", "span", "div"
+    };
+    
+    private static readonly HashSet<string> AllowedAttributes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "href", "style", "class", "id", "target", "rel"
+    };
+    
+    public string Sanitize(string html)
+    {
+        var sanitizer = new HtmlSanitizer(AllowedTags, AllowedAttributes);
+        
+        sanitizer.AllowedSchemes.Add("https");
+        sanitizer.AllowedSchemes.Remove("http");
+        
+        return sanitizer.Sanitize(html);
+    }
+}
+```
+
+---
+
+### 18.10. Secrets Management Best Practices
+
+✅ **Never commit secrets to source control**
+✅ **Use Azure Key Vault for all secrets**
+✅ **Use managed identity for Key Vault access**
+✅ **Rotate provider credentials quarterly**
+✅ **Use separate credentials per environment**
+✅ **Audit Key Vault access logs regularly**
+✅ **Implement break-glass procedures for emergency access**
+
+---
+
+### 18.11. Security Headers Middleware
+
+```csharp
+public class SecurityHeadersMiddleware
+{
+    private readonly RequestDelegate _next;
+    
+    public SecurityHeadersMiddleware(RequestDelegate next)
+    {
+        _next = next;
+    }
+    
+    public async Task InvokeAsync(HttpContext context)
+    {
+        var headers = context.Response.Headers;
+        
+        // Prevent MIME sniffing
+        headers["X-Content-Type-Options"] = "nosniff";
+        
+        // Prevent clickjacking
+        headers["X-Frame-Options"] = "DENY";
+        
+        // Control referrer information
+        headers["Referrer-Policy"] = "no-referrer";
+        
+        // Restrict feature permissions
+        headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), payment=()";
+        
+        // XSS protection (legacy but harmless)
+        headers["X-XSS-Protection"] = "0";  // Modern browsers use CSP instead
+        
+        // Content Security Policy
+        if (context.Request.Path.StartsWithSegments("/swagger"))
+        {
+            headers["Content-Security-Policy"] = 
+                "default-src 'self'; " +
+                "script-src 'self' 'unsafe-inline' 'unsafe-eval'; " +
+                "style-src 'self' 'unsafe-inline'; " +
+                "img-src 'self' data:; " +
+                "font-src 'self' data:";
+        }
+        else
+        {
+            headers["Content-Security-Policy"] = 
+                "default-src 'self'; " +
+                "script-src 'self'; " +
+                "style-src 'self'; " +
+                "img-src 'self'; " +
+                "connect-src 'self'; " +
+                "frame-ancestors 'none'";
+        }
+        
+        await _next(context);
+    }
+}
+
+// Register in Program.cs
+app.UseMiddleware<SecurityHeadersMiddleware>();
+```
 
 ---
 
 ## 19. Maintenance & Future Enhancements
 
-- **Versioning:** Plan for future API versions.
-- **Performance:** Monitor and optimize queries and indexes.
-- **Scalability:** Design for horizontal scaling.
-- **GDPR:** Ensure compliance with data privacy regulations.
+This section defines operational maintenance schedules, performance optimization strategies, and the long-term feature roadmap.
+
+---
+
+### 19.1. Maintenance Schedule
+
+**Daily Operations:**
+- 🔍 Review Azure Monitor alerts for 5xx error rates, high response times, queue backlogs
+- 🔍 Check Service Bus dead-letter queues; triage and replay failed messages
+- 🔍 Inspect Redis memory usage, eviction counts, and connection stability
+- 🔍 Monitor provider webhook failure rates (Twilio, SendGrid, FCM)
+- 🔍 Verify budget consumption and rate limit hits per tenant
+
+**Weekly Operations:**
+- 🔍 Review rate-limit exception patterns and adjust quotas if needed
+- 🔍 Analyze webhook delivery failures and update IP allowlists
+- 🔍 Audit security logs for authentication failures, suspicious API keys, or unusual access patterns
+- 🔍 Check Azure SQL DTU/vCore usage and query performance insights
+- 🔍 Review Application Insights failures and performance degradations
+
+**Monthly Operations:**
+- 🔧 SQL database maintenance:
+  - Rebuild fragmented indexes (>30% fragmentation)
+  - Update statistics with full scan
+  - Review slow queries and optimize
+- 💰 Cost and usage review:
+  - Analyze monthly Azure spend by resource
+  - Review per-tenant notification costs
+  - Adjust quotas and budgets based on trends
+- 📦 Dependency updates:
+  - Review NuGet package vulnerabilities
+  - Update non-breaking dependencies
+  - Test breaking updates in staging
+
+**Quarterly Operations:**
+- 🔐 DEK rotation per tenant (automated via Azure Function)
+- 🔐 Review Key Vault KEK versions and access logs
+- 🧪 Load testing and failover drills:
+  - Simulate provider outages
+  - Test auto-scaling rules
+  - Validate circuit breaker behavior
+- 🔄 Restore exercises:
+  - Test database backups
+  - Validate disaster recovery procedures
+
+**Annual Operations:**
+- 🔐 KEK rotation in Azure Key Vault
+- 🚨 Full disaster recovery simulation
+- 📋 Security audit and penetration testing
+- 📊 Architecture review and capacity planning
+
+---
+
+### 19.2. Performance Monitoring and Optimization
+
+**Key Metrics:**
+
+| Metric | Target | Alert Threshold |
+|--------|--------|----------------|
+| API P95 response time | < 500ms | > 1000ms |
+| Service Bus queue length | < 1000 | > 5000 |
+| SMS delivery time (P95) | < 10s | > 30s |
+| Email delivery time (P95) | < 30s | > 60s |
+| Push delivery time (P95) | < 5s | > 15s |
+| Rate limit allow/deny ratio | > 95% allow | < 90% allow |
+| Redis cache hit ratio | > 90% | < 80% |
+| App Service CPU | < 70% | > 85% |
+| SQL DTU utilization | < 80% | > 90% |
+
+**Optimization Strategies:**
+
+1. **Use async I/O everywhere** - Avoid blocking threads
+2. **Batch provider calls** - SendGrid supports up to 1000 recipients per request
+3. **Implement circuit breakers** - Prevent cascading failures with Polly
+4. **Cache template renders** - Store compiled templates in Redis with 1-hour TTL
+5. **Warm-up instances** - Preload DEKs and templates on app start
+6. **Use compiled queries** - EF Core compiled queries for frequent lookups
+7. **Partition large tables** - Consider table partitioning by date for Notifications table
+
+**Database Tuning:**
+
+```sql
+-- Identify missing indexes
+SELECT 
+    CONVERT(decimal(18,2), user_seeks * avg_total_user_cost * (avg_user_impact * 0.01)) AS index_advantage,
+    migs.last_user_seek,
+    mid.statement AS table_name,
+    mid.equality_columns,
+    mid.inequality_columns,
+    mid.included_columns
+FROM sys.dm_db_missing_index_group_stats AS migs
+INNER JOIN sys.dm_db_missing_index_groups AS mig ON migs.group_handle = mig.index_group_handle
+INNER JOIN sys.dm_db_missing_index_details AS mid ON mig.index_handle = mid.index_handle
+ORDER BY index_advantage DESC;
+
+-- Identify expensive queries
+SELECT TOP 10
+    qs.total_worker_time / qs.execution_count AS avg_cpu_time,
+    qs.total_elapsed_time / qs.execution_count AS avg_elapsed_time,
+    qs.execution_count,
+    SUBSTRING(st.text, (qs.statement_start_offset/2)+1, 
+        ((CASE qs.statement_end_offset WHEN -1 THEN DATALENGTH(st.text)
+        ELSE qs.statement_end_offset END - qs.statement_start_offset)/2) + 1) AS query_text
+FROM sys.dm_exec_query_stats AS qs
+CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) AS st
+ORDER BY avg_cpu_time DESC;
+```
+
+---
+
+### 19.3. Database Maintenance
+
+**Index Maintenance Script:**
+
+```sql
+-- Rebuild fragmented indexes
+DECLARE @TableName NVARCHAR(255);
+DECLARE @IndexName NVARCHAR(255);
+DECLARE @Fragmentation FLOAT;
+
+DECLARE index_cursor CURSOR FOR
+SELECT 
+    OBJECT_NAME(ips.object_id) AS TableName,
+    i.name AS IndexName,
+    ips.avg_fragmentation_in_percent AS Fragmentation
+FROM sys.dm_db_index_physical_stats(DB_ID(), NULL, NULL, NULL, 'LIMITED') AS ips
+INNER JOIN sys.indexes AS i ON ips.object_id = i.object_id AND ips.index_id = i.index_id
+WHERE ips.avg_fragmentation_in_percent > 30
+    AND ips.page_count > 1000
+    AND i.name IS NOT NULL;
+
+OPEN index_cursor;
+FETCH NEXT FROM index_cursor INTO @TableName, @IndexName, @Fragmentation;
+
+WHILE @@FETCH_STATUS = 0
+BEGIN
+    IF @Fragmentation > 30
+    BEGIN
+        EXEC('ALTER INDEX ' + @IndexName + ' ON ' + @TableName + ' REORGANIZE');
+        PRINT 'Reorganized: ' + @TableName + '.' + @IndexName;
+    END
+    
+    FETCH NEXT FROM index_cursor INTO @TableName, @IndexName, @Fragmentation;
+END
+
+CLOSE index_cursor;
+DEALLOCATE index_cursor;
+
+-- Update statistics
+EXEC sp_updatestats;
+```
+
+**Automated Maintenance (Azure SQL):**
+
+Enable automatic tuning:
+
+```sql
+ALTER DATABASE SCOPED CONFIGURATION SET AUTOMATIC_TUNING (FORCE_LAST_GOOD_PLAN = ON);
+ALTER DATABASE SCOPED CONFIGURATION SET AUTOMATIC_TUNING (CREATE_INDEX = ON);
+ALTER DATABASE SCOPED CONFIGURATION SET AUTOMATIC_TUNING (DROP_INDEX = ON);
+```
+
+---
+
+### 19.4. Backup and Disaster Recovery
+
+**Azure SQL Automated Backups:**
+
+- **Full backups:** Weekly
+- **Differential backups:** Every 12-24 hours
+- **Transaction log backups:** Every 5-10 minutes
+- **Point-in-time restore:** Up to 35 days (configurable)
+
+**Long-Term Retention (LTR):**
+
+```bash
+# Configure LTR policy
+az sql db ltr-policy set \
+  --resource-group rg-listo-notification-prod \
+  --server sql-listo-notification-prod \
+  --database listonotification \
+  --weekly-retention P4W \
+  --monthly-retention P12M \
+  --yearly-retention P5Y \
+  --week-of-year 1
+```
+
+**Multi-Region Failover:**
+
+```bash
+# Create failover group
+az sql failover-group create \
+  --name fg-listo-notification \
+  --resource-group rg-listo-notification-prod \
+  --server sql-listo-notification-prod \
+  --partner-server sql-listo-notification-secondary \
+  --partner-resource-group rg-listo-notification-secondary \
+  --failover-policy Automatic \
+  --grace-period 1
+```
+
+**RTO/RPO Targets:**
+
+- **Recovery Time Objective (RTO):** 60 minutes
+- **Recovery Point Objective (RPO):** 15 minutes
+- **Availability SLA:** 99.9% (3 nines)
+
+**Disaster Recovery Runbook:**
+
+1. **Detection:** Monitoring alerts trigger on-call engineer
+2. **Assessment:** Determine scope and impact
+3. **Decision:** Execute failover if RTO will be exceeded
+4. **Failover:**
+   ```bash
+   az sql failover-group set-primary \
+     --name fg-listo-notification \
+     --resource-group rg-listo-notification-prod \
+     --server sql-listo-notification-secondary
+   ```
+5. **Verification:** Run smoke tests, check health endpoints
+6. **Communication:** Update status page, notify stakeholders
+7. **Post-mortem:** Document incident and improvements
+
+---
+
+### 19.5. Scaling Strategies
+
+**App Service (API) Horizontal Scaling:**
+
+```bash
+# Configure autoscale rules
+az monitor autoscale create \
+  --resource-group rg-listo-notification-prod \
+  --name autoscale-notification-api \
+  --resource app-listo-notification-api-prod \
+  --resource-type Microsoft.Web/serverfarms \
+  --min-count 3 \
+  --max-count 10 \
+  --count 3
+
+# Scale out on CPU
+az monitor autoscale rule create \
+  --resource-group rg-listo-notification-prod \
+  --autoscale-name autoscale-notification-api \
+  --condition "Percentage CPU > 75 avg 5m" \
+  --scale out 2
+
+# Scale in on CPU
+az monitor autoscale rule create \
+  --resource-group rg-listo-notification-prod \
+  --autoscale-name autoscale-notification-api \
+  --condition "Percentage CPU < 40 avg 10m" \
+  --scale in 1
+```
+
+**Azure Functions Scaling:**
+
+- **Consumption Plan:** Automatic scaling (0 to 200 instances)
+- **Premium Plan:** Pre-warmed instances, faster cold starts, VNet integration
+- **Recommendation:** Use Premium Plan for production workloads
+
+**Azure SQL Scaling:**
+
+```bash
+# Scale up compute
+az sql db update \
+  --resource-group rg-listo-notification-prod \
+  --server sql-listo-notification-prod \
+  --name listonotification \
+  --service-objective S3  # 100 DTUs
+
+# Or switch to vCore model
+az sql db update \
+  --resource-group rg-listo-notification-prod \
+  --server sql-listo-notification-prod \
+  --name listonotification \
+  --edition GeneralPurpose \
+  --family Gen5 \
+  --capacity 4  # 4 vCores
+```
+
+**Redis Scaling:**
+
+```bash
+# Scale up tier
+az redis update \
+  --resource-group rg-listo-notification-prod \
+  --name redis-listo-notification-prod \
+  --sku Standard \
+  --vm-size C2
+```
+
+---
+
+### 19.6. Cost Optimization
+
+**Strategies:**
+
+1. **Right-size SKUs:** Monitor utilization and downscale underutilized resources
+2. **Reserved instances:** Purchase 1-year or 3-year reservations for predictable workloads (save up to 72%)
+3. **Spot instances:** Use for non-critical background jobs (save up to 90%)
+4. **Provider failover:** Only use secondary providers on failure to minimize costs
+5. **Template caching:** Cache rendered templates to reduce database hits
+6. **Azure Budgets:** Set monthly budgets with alerts at 80% and 100%
+7. **Batched operations:** Use SendGrid batch API (up to 1000 recipients) to reduce API calls
+8. **Data lifecycle:** Implement auto-archiving and retention policies
+
+**Cost Monitoring:**
+
+```bash
+# Create budget
+az consumption budget create \
+  --budget-name budget-listo-notification \
+  --category cost \
+  --amount 5000 \
+  --time-grain monthly \
+  --start-date 2025-01-01 \
+  --end-date 2026-12-31 \
+  --resource-group rg-listo-notification-prod
+
+# Add alert
+az consumption budget create-notification \
+  --budget-name budget-listo-notification \
+  --notification-key alert-80-percent \
+  --enabled true \
+  --operator GreaterThan \
+  --threshold 80 \
+  --contact-emails platform-team@listoexpress.com
+```
+
+---
+
+### 19.7. Future Feature Roadmap
+
+**Q2 2025:**
+- ✨ Template versioning with A/B testing support
+- ✨ WhatsApp Business API integration
+- ✨ In-app notification inbox with read receipts
+
+**Q3 2025:**
+- ✨ RCS (Rich Communication Services) channel
+- ✨ Tenant self-service budget and quota management UI
+- ✨ Advanced analytics dashboard with cohort analysis
+
+**Q4 2025:**
+- ✨ Multi-region active-active deployment
+- ✨ Provider-agnostic abstraction layer with weighted routing
+- ✨ Outbox pattern for transactional consistency
+
+**2026:**
+- ✨ Full CloudEvents 1.0 adoption across all producers
+- ✨ Shared schema registry for event definitions
+- ✨ Machine learning-based optimal send time predictions
+- ✨ Web-based template editor with live preview
+
+---
+
+### 19.8. Deprecation and Versioning Strategy
+
+**API Versioning:**
+- Use URL path versioning: `/api/v1`, `/api/v2`
+- Maintain at least 2 major versions simultaneously
+- Support older versions for minimum 12 months after new version release
+
+**Deprecation Process:**
+
+1. **Announcement (T-12 months):**
+   - Add `Deprecation` header: `Deprecation: true`
+   - Add `Sunset` header: `Sunset: Wed, 11 Nov 2026 11:11:11 GMT`
+   - Update API documentation with migration guides
+   - Email all API consumers
+
+2. **Warning Period (T-6 months):**
+   - Log deprecation warnings in Application Insights
+   - Track usage of deprecated endpoints
+   - Reach out to high-volume consumers
+
+3. **Grace Period (T-3 months):**
+   - Add more aggressive warnings
+   - Consider rate limiting deprecated endpoints
+
+4. **Removal (T-0):**
+   - Remove deprecated endpoints
+   - Return 410 Gone for removed endpoints
+   - Maintain redirects where possible
 
 ---
 
