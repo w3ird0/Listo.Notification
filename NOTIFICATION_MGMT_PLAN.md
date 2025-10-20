@@ -360,11 +360,15 @@ sequenceDiagram
 
 ## 4. Data Modeling & Database Schema
 
+**Status:** ✅ **COMPLETE** (as of 2025-01-20)
+
+**Referenced By:** Section 7 (Rate Limiting → RateLimiting table), Section 7 (Cost Management → CostTracking table), Section 8 (Templates → Templates table), Section 9 (Preferences → Preferences table)
+
 ### Overview
 
-**Database:** Dedicated SQL Server instance (not shared with other services)
-**Encryption:** PII encrypted at rest using AES-256-GCM with per-row IV
-**Key Management:** Encryption keys stored in Azure Key Vault
+**Database:** Dedicated SQL Server instance (not shared with other services)  
+**Encryption:** PII encrypted at rest using AES-256-GCM with per-row IV  
+**Key Management:** Encryption keys stored in Azure Key Vault  
 **TDE:** Transparent Data Encryption enabled on SQL Server
 
 ### 4.1. Notifications Table
