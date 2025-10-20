@@ -378,6 +378,7 @@ sequenceDiagram
 | Field              | Type           | Nullable | Description                               |
 |--------------------|----------------|----------|-------------------------------------------|
 | Id                 | GUID (PK)      | No       | Notification ID                           |
+| TenantId           | GUID           | No       | Tenant identifier for multi-tenancy       |
 | UserId             | string         | Yes      | Target user (null for broadcast)          |
 | ServiceOrigin      | string         | No       | auth, orders, ridesharing, products       |
 | Channel            | string         | No       | push, sms, email, inApp                   |
@@ -394,10 +395,11 @@ sequenceDiagram
 | UpdatedAt          | datetime       | No       | Last update timestamp                     |
 
 **Indexes:**
-- `IX_Notifications_UserId_CreatedAt` (UserId, CreatedAt DESC)
-- `IX_Notifications_ServiceOrigin_CreatedAt` (ServiceOrigin, CreatedAt DESC)
+- `IX_Notifications_TenantId_UserId_CreatedAt` (TenantId, UserId, CreatedAt DESC)
+- `IX_Notifications_TenantId_ServiceOrigin_CreatedAt` (TenantId, ServiceOrigin, CreatedAt DESC)
 - `IX_Notifications_Status_ScheduledAt` (Status, ScheduledAt) WHERE ScheduledAt IS NOT NULL
 - `IX_Notifications_CorrelationId` (CorrelationId)
+- `IX_Notifications_TenantId` (TenantId)
 
 ---
 
@@ -478,14 +480,15 @@ NextAttemptDelay = (BaseDelaySeconds * (BackoffFactor ^ Attempts)) + Random(0, J
 
 ### 4.4. CostTracking Table
 
-**Purpose:** Per-message cost tracking for budget management
+**Purpose:** Per-message cost tracking for budget management (per-tenant and per-service)
 
 | Field               | Type           | Nullable | Description                               |
 |---------------------|----------------|----------|-------------------------------------------|
 | CostId              | GUID (PK)      | No       | Cost record ID                            |
+| TenantId            | GUID           | No       | Tenant identifier for multi-tenancy       |
 | ServiceOrigin       | string         | No       | auth, orders, ridesharing, products       |
 | Channel             | string         | No       | push, sms, email, inApp                   |
-| Provider            | string         | No       | fcm, twilio, sendgrid                     |
+| Provider            | string         | No       | fcm, twilio, sendgrid, aws_sns, acs       |
 | UnitCostMicros      | bigint         | No       | Cost per unit in micros (1/1,000,000)     |
 | Currency            | varchar(3)     | No       | USD, EUR, etc.                            |
 | MessageId           | GUID           | Yes      | Reference to Notifications table          |
@@ -494,12 +497,31 @@ NextAttemptDelay = (BaseDelaySeconds * (BackoffFactor ^ Attempts)) + Random(0, J
 | OccurredAt          | datetime       | No       | Cost incurred timestamp                   |
 
 **Indexes:**
+- `IX_CostTracking_TenantId_ServiceOrigin_OccurredAt` (TenantId, ServiceOrigin, OccurredAt DESC)
+- `IX_CostTracking_TenantId_Channel_OccurredAt` (TenantId, Channel, OccurredAt DESC)
 - `IX_CostTracking_ServiceOrigin_OccurredAt` (ServiceOrigin, OccurredAt DESC)
-- `IX_CostTracking_Channel_OccurredAt` (Channel, OccurredAt DESC)
+- `IX_CostTracking_TenantId` (TenantId)
 
-**Monthly Rollup View:**
+**Monthly Rollup Views:**
+
 ```sql
-CREATE VIEW CostMonthlySummary AS
+-- Per-Tenant Monthly Summary
+CREATE VIEW CostMonthlySummaryByTenant AS
+SELECT 
+    TenantId,
+    ServiceOrigin,
+    Channel,
+    YEAR(OccurredAt) AS Year,
+    MONTH(OccurredAt) AS Month,
+    Currency,
+    SUM(TotalCostMicros) / 1000000.0 AS TotalCost,
+    COUNT(*) AS MessageCount,
+    AVG(TotalCostMicros) / 1000000.0 AS AvgCostPerMessage
+FROM CostTracking
+GROUP BY TenantId, ServiceOrigin, Channel, YEAR(OccurredAt), MONTH(OccurredAt), Currency;
+
+-- Per-Service Monthly Summary (across all tenants)
+CREATE VIEW CostMonthlySummaryByService AS
 SELECT 
     ServiceOrigin,
     Channel,
@@ -522,21 +544,24 @@ GROUP BY ServiceOrigin, Channel, YEAR(OccurredAt), MONTH(OccurredAt), Currency;
 
 ### 4.5. RateLimiting Table
 
-**Purpose:** Configurable rate limits per service and user
+**Purpose:** Configurable rate limits per service and user (tenant-scoped with maximum caps)
 
 | Field                    | Type     | Nullable | Description                               |
 |--------------------------|----------|----------|-------------------------------------------|
 | ConfigId                 | GUID (PK)| No       | Configuration ID                          |
+| TenantId                 | GUID     | Yes      | Tenant ID (null for global defaults)      |
 | ServiceOrigin            | string   | No       | auth, orders, ridesharing, products, *    |
 | Channel                  | string   | No       | push, sms, email, inApp, *                |
 | PerUserWindowSeconds     | int      | No       | Time window for per-user limit (3600)     |
 | PerUserMax               | int      | No       | Max per user in window (60)               |
+| PerUserMaxCap            | int      | No       | Absolute maximum cap (cannot be exceeded) |
 | PerServiceWindowSeconds  | int      | No       | Time window for per-service (86400)       |
 | PerServiceMax            | int      | No       | Max per service in window (50000)         |
+| PerServiceMaxCap         | int      | No       | Absolute maximum cap for service          |
 | BurstSize                | int      | No       | Allowed burst above limit (20)            |
 | Enabled                  | bool     | No       | Is limit enforced (default: true)         |
 
-**Unique Constraint:** (ServiceOrigin, Channel)
+**Unique Constraint:** (TenantId, ServiceOrigin, Channel)
 
 **Default Limits (Seeded):**
 ```sql
@@ -626,11 +651,12 @@ VALUES
 
 ### 4.8. Preferences Table
 
-**Purpose:** User notification preferences and quiet hours
+**Purpose:** User notification preferences and quiet hours (tenant-scoped)
 
 | Field          | Type           | Nullable | Description                               |
 |----------------|----------------|----------|-------------------------------------------|
 | PreferenceId   | GUID (PK)      | No       | Preference ID                             |
+| TenantId       | GUID           | No       | Tenant identifier for multi-tenancy       |
 | UserId         | string         | No       | User reference (from Listo.Auth)          |
 | Channel        | string         | No       | push, sms, email, inApp, *                |
 | IsEnabled      | bool           | No       | Is channel enabled (default: true)        |
@@ -639,10 +665,11 @@ VALUES
 | Locale         | varchar(10)    | No       | Preferred locale (default: en-US)         |
 | UpdatedAt      | datetime       | No       | Last update timestamp                     |
 
-**Unique Constraint:** (UserId, Channel)
+**Unique Constraint:** (TenantId, UserId, Channel)
 
 **Indexes:**
-- `IX_Preferences_UserId` (UserId)
+- `IX_Preferences_TenantId_UserId` (TenantId, UserId)
+- `IX_Preferences_TenantId` (TenantId)
 
 **Default Preferences (created on user registration):**
 ```json
@@ -733,6 +760,46 @@ VALUES
 - `IX_Devices_LastSeen` (LastSeen) for cleanup
 
 **Cleanup:** Remove devices inactive for > 90 days
+
+---
+
+### 4.11.1. Multi-Tenancy Isolation Strategy
+
+**Implementation Model:** Schema-based isolation with `TenantId` scoping
+
+**Tenant-Scoped Tables:**
+- Notifications
+- CostTracking
+- RateLimiting (tenant-specific overrides, null TenantId for global defaults)
+- Preferences
+
+**Global Tables (Not Tenant-Scoped):**
+- Templates (shared across all tenants)
+- RetryPolicy (global retry configurations)
+- AuditLog (tenant tracked via context, not foreign key)
+- Devices (user-scoped, tenant inferred from user)
+- Conversations/Messages (user-scoped, tenant inferred)
+
+**Data Isolation Rules:**
+1. All queries MUST include `WHERE TenantId = @TenantId` for tenant-scoped tables
+2. User authentication includes TenantId in JWT claims (`tenant_id` claim)
+3. Service-to-service calls include `X-Tenant-Id` header for tenant context
+4. Budgets and costs tracked independently per tenant
+5. Rate limits can be overridden per tenant (tenant-specific configs take precedence over global)
+
+**Tenant Context Flow:**
+```
+Client Request → JWT → Extract TenantId from claims → Set in HttpContext
+→ Repository layer enforces TenantId filter → Database query scoped by TenantId
+```
+
+**Row-Level Security (Optional Enhancement):**
+```sql
+CREATE SECURITY POLICY NotificationsTenantPolicy
+ADD FILTER PREDICATE dbo.fn_TenantAccessPredicate(TenantId)
+ON dbo.Notifications
+WITH (STATE = ON);
+```
 
 ---
 
