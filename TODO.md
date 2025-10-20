@@ -21,6 +21,12 @@
 - [x] Start Section 4: Database Schema
   - [x] Add schema overview with encryption and TDE
   - [x] Begin Notifications table specification with indexes
+- [x] Create WARP.md file
+  - [x] Document common git/dotnet commands for Windows/PowerShell
+  - [x] Add .NET scaffolding commands for Clean Architecture setup
+  - [x] Document high-level architecture and integration patterns
+  - [x] List Azure components and technology stack
+  - [x] Include project-specific conventions (No MediatR, versioned routes, etc.)
 
 ---
 
