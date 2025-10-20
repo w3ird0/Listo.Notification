@@ -14,6 +14,23 @@ using Listo.Notification.API.Middleware;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Configure HTTPS and HSTS for production
+if (!builder.Environment.IsDevelopment())
+{
+    builder.Services.AddHttpsRedirection(options =>
+    {
+        options.RedirectStatusCode = StatusCodes.Status308PermanentRedirect;
+        options.HttpsPort = 443;
+    });
+
+    builder.Services.AddHsts(options =>
+    {
+        options.Preload = true;
+        options.IncludeSubDomains = true;
+        options.MaxAge = TimeSpan.FromDays(365);
+    });
+}
+
 // Add services to the container
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
@@ -102,7 +119,31 @@ builder.Services.AddAuthentication(options =>
     };
 });
 
-builder.Services.AddAuthorization();
+// Configure Authorization Policies
+builder.Services.AddAuthorization(options =>
+{
+    // Admin-only endpoints (cost tracking, templates management, rate limit overrides)
+    options.AddPolicy("AdminOnly", policy =>
+        policy.RequireRole("Admin"));
+
+    // Support and Admin access (view audit logs, conversations)
+    options.AddPolicy("SupportAccess", policy =>
+        policy.RequireRole("Admin", "Support"));
+
+    // Service-to-Service internal endpoints
+    options.AddPolicy("ServiceOnly", policy =>
+        policy.RequireRole("Service"));
+
+    // Manage notification templates (create, update, delete)
+    options.AddPolicy("ManageTemplates", policy =>
+        policy.RequireRole("Admin")
+              .RequireClaim("permissions", "notifications.templates.write"));
+
+    // Manage rate limits and budgets
+    options.AddPolicy("ManageBudgets", policy =>
+        policy.RequireRole("Admin")
+              .RequireClaim("permissions", "notifications.budgets.write"));
+});
 
 // Register repositories
 builder.Services.AddScoped<INotificationRepository, Listo.Notification.Infrastructure.Repositories.NotificationRepository>();
@@ -234,12 +275,24 @@ if (app.Environment.IsDevelopment())
     app.UseSwagger();
     app.UseSwaggerUI();
 }
+else
+{
+    // Enable HSTS in production
+    app.UseHsts();
+}
 
 app.UseHttpsRedirection();
+
+// Request validation (before authentication)
+app.UseRequestValidation();
 
 // Enable rate limiting
 app.UseRateLimiter();
 
+// Service-to-service authentication (for internal endpoints)
+app.UseServiceSecretAuthentication();
+
+// Standard authentication and authorization
 app.UseAuthentication();
 app.UseAuthorization();
 
@@ -248,7 +301,8 @@ app.UseTenantContext();
 
 app.MapControllers();
 
-// Map SignalR hub
+// Map SignalR hubs
 app.MapHub<NotificationHub>("/hubs/notifications");
+app.MapHub<MessagingHub>("/hubs/messaging");
 
 app.Run();
