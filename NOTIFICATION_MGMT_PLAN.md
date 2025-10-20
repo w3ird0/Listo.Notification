@@ -378,6 +378,7 @@ sequenceDiagram
 | Field              | Type           | Nullable | Description                               |
 |--------------------|----------------|----------|-------------------------------------------|
 | Id                 | GUID (PK)      | No       | Notification ID                           |
+| TenantId           | GUID           | No       | Tenant identifier for multi-tenancy       |
 | UserId             | string         | Yes      | Target user (null for broadcast)          |
 | ServiceOrigin      | string         | No       | auth, orders, ridesharing, products       |
 | Channel            | string         | No       | push, sms, email, inApp                   |
@@ -394,10 +395,11 @@ sequenceDiagram
 | UpdatedAt          | datetime       | No       | Last update timestamp                     |
 
 **Indexes:**
-- `IX_Notifications_UserId_CreatedAt` (UserId, CreatedAt DESC)
-- `IX_Notifications_ServiceOrigin_CreatedAt` (ServiceOrigin, CreatedAt DESC)
+- `IX_Notifications_TenantId_UserId_CreatedAt` (TenantId, UserId, CreatedAt DESC)
+- `IX_Notifications_TenantId_ServiceOrigin_CreatedAt` (TenantId, ServiceOrigin, CreatedAt DESC)
 - `IX_Notifications_Status_ScheduledAt` (Status, ScheduledAt) WHERE ScheduledAt IS NOT NULL
 - `IX_Notifications_CorrelationId` (CorrelationId)
+- `IX_Notifications_TenantId` (TenantId)
 
 ---
 
@@ -478,14 +480,15 @@ NextAttemptDelay = (BaseDelaySeconds * (BackoffFactor ^ Attempts)) + Random(0, J
 
 ### 4.4. CostTracking Table
 
-**Purpose:** Per-message cost tracking for budget management
+**Purpose:** Per-message cost tracking for budget management (per-tenant and per-service)
 
 | Field               | Type           | Nullable | Description                               |
 |---------------------|----------------|----------|-------------------------------------------|
 | CostId              | GUID (PK)      | No       | Cost record ID                            |
+| TenantId            | GUID           | No       | Tenant identifier for multi-tenancy       |
 | ServiceOrigin       | string         | No       | auth, orders, ridesharing, products       |
 | Channel             | string         | No       | push, sms, email, inApp                   |
-| Provider            | string         | No       | fcm, twilio, sendgrid                     |
+| Provider            | string         | No       | fcm, twilio, sendgrid, aws_sns, acs       |
 | UnitCostMicros      | bigint         | No       | Cost per unit in micros (1/1,000,000)     |
 | Currency            | varchar(3)     | No       | USD, EUR, etc.                            |
 | MessageId           | GUID           | Yes      | Reference to Notifications table          |
@@ -494,12 +497,31 @@ NextAttemptDelay = (BaseDelaySeconds * (BackoffFactor ^ Attempts)) + Random(0, J
 | OccurredAt          | datetime       | No       | Cost incurred timestamp                   |
 
 **Indexes:**
+- `IX_CostTracking_TenantId_ServiceOrigin_OccurredAt` (TenantId, ServiceOrigin, OccurredAt DESC)
+- `IX_CostTracking_TenantId_Channel_OccurredAt` (TenantId, Channel, OccurredAt DESC)
 - `IX_CostTracking_ServiceOrigin_OccurredAt` (ServiceOrigin, OccurredAt DESC)
-- `IX_CostTracking_Channel_OccurredAt` (Channel, OccurredAt DESC)
+- `IX_CostTracking_TenantId` (TenantId)
 
-**Monthly Rollup View:**
+**Monthly Rollup Views:**
+
 ```sql
-CREATE VIEW CostMonthlySummary AS
+-- Per-Tenant Monthly Summary
+CREATE VIEW CostMonthlySummaryByTenant AS
+SELECT 
+    TenantId,
+    ServiceOrigin,
+    Channel,
+    YEAR(OccurredAt) AS Year,
+    MONTH(OccurredAt) AS Month,
+    Currency,
+    SUM(TotalCostMicros) / 1000000.0 AS TotalCost,
+    COUNT(*) AS MessageCount,
+    AVG(TotalCostMicros) / 1000000.0 AS AvgCostPerMessage
+FROM CostTracking
+GROUP BY TenantId, ServiceOrigin, Channel, YEAR(OccurredAt), MONTH(OccurredAt), Currency;
+
+-- Per-Service Monthly Summary (across all tenants)
+CREATE VIEW CostMonthlySummaryByService AS
 SELECT 
     ServiceOrigin,
     Channel,
@@ -522,21 +544,24 @@ GROUP BY ServiceOrigin, Channel, YEAR(OccurredAt), MONTH(OccurredAt), Currency;
 
 ### 4.5. RateLimiting Table
 
-**Purpose:** Configurable rate limits per service and user
+**Purpose:** Configurable rate limits per service and user (tenant-scoped with maximum caps)
 
 | Field                    | Type     | Nullable | Description                               |
 |--------------------------|----------|----------|-------------------------------------------|
 | ConfigId                 | GUID (PK)| No       | Configuration ID                          |
+| TenantId                 | GUID     | Yes      | Tenant ID (null for global defaults)      |
 | ServiceOrigin            | string   | No       | auth, orders, ridesharing, products, *    |
 | Channel                  | string   | No       | push, sms, email, inApp, *                |
 | PerUserWindowSeconds     | int      | No       | Time window for per-user limit (3600)     |
 | PerUserMax               | int      | No       | Max per user in window (60)               |
+| PerUserMaxCap            | int      | No       | Absolute maximum cap (cannot be exceeded) |
 | PerServiceWindowSeconds  | int      | No       | Time window for per-service (86400)       |
 | PerServiceMax            | int      | No       | Max per service in window (50000)         |
+| PerServiceMaxCap         | int      | No       | Absolute maximum cap for service          |
 | BurstSize                | int      | No       | Allowed burst above limit (20)            |
 | Enabled                  | bool     | No       | Is limit enforced (default: true)         |
 
-**Unique Constraint:** (ServiceOrigin, Channel)
+**Unique Constraint:** (TenantId, ServiceOrigin, Channel)
 
 **Default Limits (Seeded):**
 ```sql
@@ -626,11 +651,12 @@ VALUES
 
 ### 4.8. Preferences Table
 
-**Purpose:** User notification preferences and quiet hours
+**Purpose:** User notification preferences and quiet hours (tenant-scoped)
 
 | Field          | Type           | Nullable | Description                               |
 |----------------|----------------|----------|-------------------------------------------|
 | PreferenceId   | GUID (PK)      | No       | Preference ID                             |
+| TenantId       | GUID           | No       | Tenant identifier for multi-tenancy       |
 | UserId         | string         | No       | User reference (from Listo.Auth)          |
 | Channel        | string         | No       | push, sms, email, inApp, *                |
 | IsEnabled      | bool           | No       | Is channel enabled (default: true)        |
@@ -639,10 +665,11 @@ VALUES
 | Locale         | varchar(10)    | No       | Preferred locale (default: en-US)         |
 | UpdatedAt      | datetime       | No       | Last update timestamp                     |
 
-**Unique Constraint:** (UserId, Channel)
+**Unique Constraint:** (TenantId, UserId, Channel)
 
 **Indexes:**
-- `IX_Preferences_UserId` (UserId)
+- `IX_Preferences_TenantId_UserId` (TenantId, UserId)
+- `IX_Preferences_TenantId` (TenantId)
 
 **Default Preferences (created on user registration):**
 ```json
@@ -733,6 +760,46 @@ VALUES
 - `IX_Devices_LastSeen` (LastSeen) for cleanup
 
 **Cleanup:** Remove devices inactive for > 90 days
+
+---
+
+### 4.11.1. Multi-Tenancy Isolation Strategy
+
+**Implementation Model:** Schema-based isolation with `TenantId` scoping
+
+**Tenant-Scoped Tables:**
+- Notifications
+- CostTracking
+- RateLimiting (tenant-specific overrides, null TenantId for global defaults)
+- Preferences
+
+**Global Tables (Not Tenant-Scoped):**
+- Templates (shared across all tenants)
+- RetryPolicy (global retry configurations)
+- AuditLog (tenant tracked via context, not foreign key)
+- Devices (user-scoped, tenant inferred from user)
+- Conversations/Messages (user-scoped, tenant inferred)
+
+**Data Isolation Rules:**
+1. All queries MUST include `WHERE TenantId = @TenantId` for tenant-scoped tables
+2. User authentication includes TenantId in JWT claims (`tenant_id` claim)
+3. Service-to-service calls include `X-Tenant-Id` header for tenant context
+4. Budgets and costs tracked independently per tenant
+5. Rate limits can be overridden per tenant (tenant-specific configs take precedence over global)
+
+**Tenant Context Flow:**
+```
+Client Request → JWT → Extract TenantId from claims → Set in HttpContext
+→ Repository layer enforces TenantId filter → Database query scoped by TenantId
+```
+
+**Row-Level Security (Optional Enhancement):**
+```sql
+CREATE SECURITY POLICY NotificationsTenantPolicy
+ADD FILTER PREDICATE dbo.fn_TenantAccessPredicate(TenantId)
+ON dbo.Notifications
+WITH (STATE = ON);
+```
 
 ---
 
@@ -1901,11 +1968,1082 @@ Content-Type: application/json
 
 ---
 
-## 7. API Implementation
+## 7. Cost Management & Rate Limiting
+
+This section defines the cost tracking, budget management, and rate limiting strategies for the notification service. Both per-tenant and per-service tracking are implemented with maximum caps enforcement.
+
+### 7.1. Redis Token Bucket Rate Limiting
+
+**Implementation:** Redis-based token bucket algorithm with atomic operations
+
+**Key Structure:**
+- **Per-User:** `rl:user:{tenantId}:{userId}:{channel}`
+- **Per-Service:** `rl:service:{tenantId}:{serviceOrigin}:{channel}`
+- **Per-Tenant:** `rl:tenant:{tenantId}:{channel}`
+
+**Token Bucket Data:**
+```json
+{
+  "tokens": 60,
+  "capacity": 60,
+  "refillRate": 60,
+  "refillIntervalSeconds": 3600,
+  "lastRefillTimestamp": 1705315800
+}
+```
+
+**Lua Script (Atomic Check and Consume):**
+```lua
+-- rate_limit.lua
+local key = KEYS[1]
+local capacity = tonumber(ARGV[1])
+local refillRate = tonumber(ARGV[2])
+local refillInterval = tonumber(ARGV[3])
+local requestedTokens = tonumber(ARGV[4])
+local now = tonumber(ARGV[5])
+
+-- Get current bucket state
+local bucket = redis.call('HMGET', key, 'tokens', 'lastRefillTimestamp')
+local tokens = tonumber(bucket[1]) or capacity
+local lastRefill = tonumber(bucket[2]) or now
+
+-- Calculate tokens to add based on time elapsed
+local elapsedSeconds = now - lastRefill
+if elapsedSeconds > 0 then
+    local tokensToAdd = math.floor((elapsedSeconds / refillInterval) * refillRate)
+    tokens = math.min(capacity, tokens + tokensToAdd)
+    lastRefill = now
+end
+
+-- Check if enough tokens available
+if tokens >= requestedTokens then
+    tokens = tokens - requestedTokens
+    redis.call('HMSET', key, 'tokens', tokens, 'lastRefillTimestamp', lastRefill)
+    redis.call('EXPIRE', key, refillInterval * 2)
+    return {1, tokens, capacity}
+else
+    redis.call('HMSET', key, 'tokens', tokens, 'lastRefillTimestamp', lastRefill)
+    redis.call('EXPIRE', key, refillInterval * 2)
+    local retryAfter = math.ceil((requestedTokens - tokens) * refillInterval / refillRate)
+    return {0, tokens, retryAfter}
+end
+```
+
+**C# .NET 9 Implementation:**
+```csharp
+using StackExchange.Redis;
+using System.Security.Cryptography;
+
+namespace Listo.Notification.Infrastructure.RateLimiting;
+
+public class RedisTokenBucketLimiter
+{
+    private readonly IConnectionMultiplexer _redis;
+    private readonly string _luaScript;
+    
+    public RedisTokenBucketLimiter(IConnectionMultiplexer redis)
+    {
+        _redis = redis;
+        _luaScript = LoadLuaScript(); // Load from embedded resource or file
+    }
+    
+    public async Task<RateLimitResult> CheckAndConsumeAsync(
+        string tenantId,
+        string userId,
+        string channel,
+        RateLimitConfig config,
+        int tokensRequested = 1)
+    {
+        var key = $"rl:user:{tenantId}:{userId}:{channel}";
+        var db = _redis.GetDatabase();
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        
+        var result = await db.ScriptEvaluateAsync(
+            _luaScript,
+            new RedisKey[] { key },
+            new RedisValue[] 
+            {
+                config.Capacity,
+                config.RefillRate,
+                config.RefillIntervalSeconds,
+                tokensRequested,
+                now
+            }
+        );
+        
+        var values = (RedisValue[])result!;
+        var allowed = (int)values[0] == 1;
+        var remainingTokens = (int)values[1];
+        var retryAfterOrCapacity = (int)values[2];
+        
+        return new RateLimitResult
+        {
+            Allowed = allowed,
+            Limit = config.Capacity,
+            Remaining = remainingTokens,
+            RetryAfterSeconds = allowed ? null : retryAfterOrCapacity,
+            ResetAt = DateTimeOffset.UtcNow.AddSeconds(config.RefillIntervalSeconds)
+        };
+    }
+    
+    public async Task<RateLimitResult> CheckServiceLimitAsync(
+        string tenantId,
+        string serviceOrigin,
+        string channel,
+        RateLimitConfig config)
+    {
+        var key = $"rl:service:{tenantId}:{serviceOrigin}:{channel}";
+        // Similar implementation
+        return await CheckAndConsumeInternalAsync(key, config);
+    }
+    
+    private async Task<RateLimitResult> CheckAndConsumeInternalAsync(
+        string key, 
+        RateLimitConfig config, 
+        int tokensRequested = 1)
+    {
+        // Implementation details...
+    }
+}
+
+public record RateLimitConfig(
+    int Capacity,
+    int RefillRate,
+    int RefillIntervalSeconds,
+    int MaxCap
+);
+
+public record RateLimitResult
+{
+    public required bool Allowed { get; init; }
+    public required int Limit { get; init; }
+    public required int Remaining { get; init; }
+    public int? RetryAfterSeconds { get; init; }
+    public DateTimeOffset ResetAt { get; init; }
+}
+```
+
+---
+
+### 7.2. Rate Limiting Middleware
+
+**HTTP Response Headers:**
+- `X-RateLimit-Limit`: Maximum requests allowed in window
+- `X-RateLimit-Remaining`: Remaining requests in current window
+- `X-RateLimit-Reset`: Unix timestamp when window resets
+- `Retry-After`: Seconds to wait before retrying (429 responses only)
+
+**Middleware Implementation:**
+```csharp
+using Microsoft.AspNetCore.Http;
+
+namespace Listo.Notification.API.Middleware;
+
+public class RateLimitingMiddleware
+{
+    private readonly RequestDelegate _next;
+    private readonly RedisTokenBucketLimiter _limiter;
+    private readonly ILogger<RateLimitingMiddleware> _logger;
+    
+    public RateLimitingMiddleware(
+        RequestDelegate next,
+        RedisTokenBucketLimiter limiter,
+        ILogger<RateLimitingMiddleware> logger)
+    {
+        _next = next;
+        _limiter = limiter;
+        _logger = logger;
+    }
+    
+    public async Task InvokeAsync(HttpContext context)
+    {
+        // Extract tenant and user from JWT claims
+        var tenantId = context.User.FindFirst("tenant_id")?.Value;
+        var userId = context.User.FindFirst("sub")?.Value;
+        
+        if (string.IsNullOrEmpty(tenantId) || string.IsNullOrEmpty(userId))
+        {
+            await _next(context);
+            return;
+        }
+        
+        // Get rate limit config from database (cached)
+        var config = await GetRateLimitConfigAsync(tenantId, "*", "api");
+        
+        // Check rate limit
+        var result = await _limiter.CheckAndConsumeAsync(
+            tenantId, userId, "api", config
+        );
+        
+        // Add headers
+        context.Response.Headers.Append("X-RateLimit-Limit", result.Limit.ToString());
+        context.Response.Headers.Append("X-RateLimit-Remaining", result.Remaining.ToString());
+        context.Response.Headers.Append("X-RateLimit-Reset", result.ResetAt.ToUnixTimeSeconds().ToString());
+        
+        if (!result.Allowed)
+        {
+            context.Response.StatusCode = 429;
+            context.Response.Headers.Append("Retry-After", result.RetryAfterSeconds.ToString());
+            
+            await context.Response.WriteAsJsonAsync(new
+            {
+                error = new
+                {
+                    code = "RATE_LIMIT_EXCEEDED",
+                    message = "Rate limit exceeded. Please retry after the specified time.",
+                    retryAfter = result.RetryAfterSeconds,
+                    limit = result.Limit
+                }
+            });
+            
+            _logger.LogWarning(
+                "Rate limit exceeded for tenant {TenantId}, user {UserId}",
+                tenantId, userId
+            );
+            return;
+        }
+        
+        await _next(context);
+    }
+    
+    private async Task<RateLimitConfig> GetRateLimitConfigAsync(
+        string tenantId, string serviceOrigin, string channel)
+    {
+        // Query RateLimiting table with tenant-specific fallback
+        // Tenant-specific config overrides global default
+        return new RateLimitConfig(60, 60, 3600, 100); // Example
+    }
+}
+```
+
+---
+
+### 7.3. Quota Enforcement Strategy
+
+**Priority Order (Admin Override → Service Quota → User Quota → Global):**
+
+1. **Admin Override Check:** If `X-Admin-Override: true` header present with valid `notifications:admin` scope
+2. **Service Quota Check:** Per-service daily/monthly caps from `RateLimiting` table
+3. **User Quota Check:** Per-user hourly caps from `RateLimiting` table  
+4. **Maximum Cap Enforcement:** Absolute maximum (cannot be overridden except by admin)
+
+**Quota Check Flow:**
+```mermaid
+flowchart TD
+    A[Incoming Request] --> B{Admin Override Header?}
+    B -->|Yes| C{Valid Admin Token?}
+    C -->|Yes| D[Allow - Log Override]
+    C -->|No| E[Deny - Invalid Admin]
+    B -->|No| F{Check Tenant Service Quota}
+    F -->|Within Limit| G{Check User Quota}
+    F -->|Exceeded| H{Below Max Cap?}
+    H -->|Yes| I[Allow - Warn Near Limit]
+    H -->|No| J[Deny - 429 Max Cap]
+    G -->|Within Limit| K[Allow - Add Headers]
+    G -->|Exceeded| L[Deny - 429 User Quota]
+    K --> M[Process Request]
+    D --> M
+    I --> M
+```
+
+---
+
+### 7.4. Budget Tracking (Per-Tenant AND Per-Service)
+
+**Budget Configuration:**
+```json
+{
+  "tenantId": "tenant-uuid-123",
+  "serviceOrigin": "orders",
+  "channel": "sms",
+  "currency": "USD",
+  "monthlyBudgetMicros": 50000000,
+  "alertThresholds": [0.8, 1.0],
+  "currentSpendMicros": 35000000,
+  "periodStart": "2024-01-01T00:00:00Z",
+  "periodEnd": "2024-01-31T23:59:59Z"
+}
+```
+
+**Cost Computation Per Channel:**
+- **Email (SendGrid):** $0.00095/email → 950 micros
+- **SMS (Twilio US):** $0.0079/message → 7900 micros
+- **SMS Multi-segment:** 7900 micros × segment count
+- **Push (FCM):** $0 (free, tracked for analytics)
+- **In-App:** $0 (free, tracked for analytics)
+
+**Budget Monitoring (Azure Function - Hourly):**
+```csharp
+using Microsoft.Azure.Functions.Worker;
+
+namespace Listo.Notification.Functions;
+
+public class BudgetMonitorFunction
+{
+    private readonly NotificationDbContext _context;
+    private readonly IServiceBusPublisher _serviceBus;
+    
+    [Function("BudgetMonitor")]
+    public async Task RunAsync(
+        [TimerTrigger("0 0 * * * *")] TimerInfo timer) // Every hour
+    {
+        var currentMonth = DateTime.UtcNow;
+        var periodStart = new DateTime(currentMonth.Year, currentMonth.Month, 1);
+        var periodEnd = periodStart.AddMonths(1).AddSeconds(-1);
+        
+        // Query cost summaries per tenant and service
+        var tenantCosts = await _context.CostTracking
+            .Where(c => c.OccurredAt >= periodStart && c.OccurredAt <= periodEnd)
+            .GroupBy(c => new { c.TenantId, c.ServiceOrigin, c.Channel, c.Currency })
+            .Select(g => new
+            {
+                g.Key.TenantId,
+                g.Key.ServiceOrigin,
+                g.Key.Channel,
+                g.Key.Currency,
+                TotalCostMicros = g.Sum(c => c.TotalCostMicros)
+            })
+            .ToListAsync();
+        
+        // Check against budgets
+        foreach (var cost in tenantCosts)
+        {
+            var budget = await GetBudgetAsync(
+                cost.TenantId, cost.ServiceOrigin, cost.Channel
+            );
+            
+            if (budget == null) continue;
+            
+            var utilizationPercent = (double)cost.TotalCostMicros / budget.MonthlyBudgetMicros;
+            
+            // Check thresholds (80%, 100%)
+            if (utilizationPercent >= 0.8 && !budget.Alert80Sent)
+            {
+                await SendBudgetAlertAsync(cost.TenantId, cost.ServiceOrigin, 80, utilizationPercent);
+                budget.Alert80Sent = true;
+            }
+            
+            if (utilizationPercent >= 1.0 && !budget.Alert100Sent)
+            {
+                await SendBudgetAlertAsync(cost.TenantId, cost.ServiceOrigin, 100, utilizationPercent);
+                budget.Alert100Sent = true;
+                
+                // Publish budget exceeded event to Service Bus
+                await _serviceBus.PublishAsync(new BudgetThresholdCrossedEvent
+                {
+                    TenantId = cost.TenantId,
+                    ServiceOrigin = cost.ServiceOrigin,
+                    Channel = cost.Channel,
+                    ThresholdPercent = 100,
+                    ActualPercent = utilizationPercent * 100,
+                    CurrentSpend = cost.TotalCostMicros / 1000000.0m,
+                    Budget = budget.MonthlyBudgetMicros / 1000000.0m,
+                    Currency = cost.Currency
+                });
+            }
+        }
+        
+        await _context.SaveChangesAsync();
+    }
+    
+    private async Task SendBudgetAlertAsync(
+        Guid tenantId, string serviceOrigin, int threshold, double actual)
+    {
+        // Send email + SignalR notification to admins
+    }
+}
+```
+
+**Budget Threshold Event:**
+```json
+{
+  "specversion": "1.0",
+  "type": "com.listoexpress.notifications.budget.threshold-crossed",
+  "source": "https://notifications.listoexpress.com",
+  "id": "evt-budget-001",
+  "time": "2024-01-25T14:30:00Z",
+  "datacontenttype": "application/json",
+  "data": {
+    "tenantId": "tenant-uuid-123",
+    "serviceOrigin": "orders",
+    "channel": "sms",
+    "thresholdPercent": 100,
+    "actualPercent": 105.3,
+    "currentSpend": 52.65,
+    "budget": 50.00,
+    "currency": "USD"
+  }
+}
+```
+
+---
+
+### 7.5. Admin Override with Audit Trail
+
+**Admin Override Request:**
+```http
+POST /api/v1/notifications/send
+Authorization: Bearer {admin_jwt_with_notifications:admin_scope}
+X-Admin-Override: true
+X-Tenant-Id: tenant-uuid-123
+Content-Type: application/json
+
+{
+  "reason": "Critical system alert - payment failure notification",
+  "scopeType": "tenant",
+  "scopeId": "tenant-uuid-123",
+  "ttlMinutes": 60,
+  "notification": {
+    "userId": "user-uuid-456",
+    "channel": "sms",
+    "templateKey": "payment_failed",
+    "data": { ... }
+  }
+}
+```
+
+**Admin Override Validation:**
+```csharp
+public class AdminOverrideService
+{
+    public async Task<AdminOverrideResult> ValidateOverrideAsync(
+        HttpContext context, AdminOverrideRequest request)
+    {
+        // 1. Verify JWT has notifications:admin scope
+        if (!context.User.HasClaim("scope", "notifications:admin"))
+        {
+            return AdminOverrideResult.Forbidden("Missing admin scope");
+        }
+        
+        // 2. Validate reason provided
+        if (string.IsNullOrWhiteSpace(request.Reason) || request.Reason.Length < 20)
+        {
+            return AdminOverrideResult.Invalid("Reason must be at least 20 characters");
+        }
+        
+        // 3. Create audit record
+        var audit = new AdminOverrideAudit
+        {
+            OverrideId = Guid.NewGuid(),
+            AdminUserId = context.User.FindFirst("sub")!.Value,
+            TenantId = request.ScopeId,
+            ScopeType = request.ScopeType,
+            Reason = request.Reason,
+            TtlMinutes = request.TtlMinutes,
+            CreatedAt = DateTime.UtcNow,
+            ExpiresAt = DateTime.UtcNow.AddMinutes(request.TtlMinutes),
+            IpAddress = context.Connection.RemoteIpAddress?.ToString(),
+            UserAgent = context.Request.Headers.UserAgent.ToString()
+        };
+        
+        await _context.AdminOverrides.AddAsync(audit);
+        await _context.SaveChangesAsync();
+        
+        // 4. Log to audit trail
+        _logger.LogWarning(
+            "Admin override granted: {OverrideId} by {AdminUserId} for {TenantId}. Reason: {Reason}",
+            audit.OverrideId, audit.AdminUserId, audit.TenantId, audit.Reason
+        );
+        
+        return AdminOverrideResult.Allowed(audit.OverrideId);
+    }
+}
+```
+
+**Audit Log Entry:**
+```json
+{
+  "overrideId": "override-uuid-789",
+  "adminUserId": "admin-uuid-111",
+  "adminEmail": "admin@listoexpress.com",
+  "tenantId": "tenant-uuid-123",
+  "scopeType": "tenant",
+  "reason": "Critical system alert - payment failure notification",
+  "ttlMinutes": 60,
+  "createdAt": "2024-01-25T14:30:00Z",
+  "expiresAt": "2024-01-25T15:30:00Z",
+  "ipAddress": "203.0.113.42",
+  "userAgent": "Mozilla/5.0..."
+}
+```
+
+---
+
+### 7.6. Configuration (appsettings.json)
+
+```json
+{
+  "RateLimiting": {
+    "Redis": {
+      "ConnectionString": "{{REDIS_CONNECTION_STRING}}",
+      "DefaultDatabase": 0
+    },
+    "Defaults": {
+      "PerUserHourly": {
+        "Capacity": 60,
+        "RefillRate": 60,
+        "RefillIntervalSeconds": 3600,
+        "BurstSize": 20,
+        "MaxCap": 100
+      },
+      "PerServiceDaily": {
+        "Email": {
+          "Capacity": 50000,
+          "MaxCap": 100000
+        },
+        "SMS": {
+          "Capacity": 10000,
+          "MaxCap": 20000
+        },
+        "Push": {
+          "Capacity": 200000,
+          "MaxCap": 500000
+        },
+        "InApp": {
+          "Capacity": 999999999,
+          "MaxCap": 999999999
+        }
+      }
+    }
+  },
+  "Budgets": {
+    "Defaults": {
+      "MonthlyPerTenantUsd": {
+        "Email": 100.00,
+        "SMS": 500.00,
+        "Push": 0.00
+      },
+      "AlertThresholds": [0.8, 1.0],
+      "Currency": "USD"
+    },
+    "CostPerUnit": {
+      "Email": {
+        "Provider": "sendgrid",
+        "UnitCostMicros": 950
+      },
+      "SMS": {
+        "Provider": "twilio",
+        "UnitCostMicros": 7900,
+        "PerSegment": true
+      },
+      "Push": {
+        "Provider": "fcm",
+        "UnitCostMicros": 0
+      }
+    }
+  },
+  "AdminOverride": {
+    "RequiredScope": "notifications:admin",
+    "MinReasonLength": 20,
+    "DefaultTtlMinutes": 60,
+    "MaxTtlMinutes": 1440
+  }
+}
+```
+
+---
+
+## 8. Notification Delivery Strategy
+
+This section defines the delivery routing rules, retry policies with exponential backoff and jitter, provider failover strategies, webhook handlers, and template rendering.
+
+### 8.1. Synchronous vs Asynchronous Routing
+
+**Synchronous Delivery (< 2 second response):**
+- **Use Cases:** Driver assignment (Orders, RideSharing), OTP/2FA, Critical system alerts
+- **Timeout:** Hard timeout at 2 seconds
+- **Retry:** Single attempt or limited retries (max 2)
+- **Channels:** Push notifications + SignalR
+- **Implementation:** Direct HTTP call to provider APIs
+
+**Asynchronous Delivery (Queue-based):**
+- **Use Cases:** Order confirmations, marketing, receipts, non-critical notifications
+- **Timeout:** Configurable per channel (20-30 seconds)
+- **Retry:** Full exponential backoff policy (up to 6 attempts)
+- **Channels:** Email, SMS, Push (non-critical), In-App
+- **Implementation:** Azure Service Bus → Azure Function → Provider API
+
+**Priority Queue Tiers:**
+
+| Priority | Queue Name | Use Cases | Processing |
+|----------|------------|-----------|------------|
+| **High** | `listo-notifications-priority` | OTP/2FA, Driver assignment, Security alerts | Real-time, max 2s latency |
+| **Normal** | `listo-notifications-queue` | Order updates, Ride confirmations | Standard, max 30s latency |
+| **Low** | `listo-notifications-bulk` | Marketing, Newsletters, Batch notifications | Batched, up to 5min latency |
+
+**Routing Decision Logic:**
+```csharp
+public DeliveryMode DetermineDeliveryMode(NotificationRequest request)
+{
+    // Synchronous criteria
+    if (request.TemplateKey.Contains("driver_assign") || 
+        request.TemplateKey.Contains("otp") ||
+        request.TemplateKey.Contains("2fa") ||
+        request.Priority == "critical")
+    {
+        return DeliveryMode.Synchronous;
+    }
+    
+    // Priority queue
+    if (request.Priority == "high")
+    {
+        return DeliveryMode.PriorityQueue;
+    }
+    
+    // Bulk
+    if (request.IsBulk || request.Priority == "low")
+    {
+    return DeliveryMode.BulkQueue;
+    }
+    
+    // Default: standard async
+    return DeliveryMode.StandardQueue;
+}
+```
+
+---
+
+### 8.2. Channel-Specific Retry Policies
+
+**Retry Policy Configuration (from Section 4.3):**
+
+**OTP/SMS (Auth - High Priority):**
+```json
+{
+  "serviceOrigin": "auth",
+  "channel": "sms",
+  "maxAttempts": 4,
+  "baseDelaySeconds": 3,
+  "backoffFactor": 2.0,
+  "maxBackoffSeconds": 120,
+  "jitterMs": 1000,
+  "timeoutSeconds": 20
+}
+```
+
+**Email (Standard):**
+```json
+{
+  "serviceOrigin": "*",
+  "channel": "email",
+  "maxAttempts": 6,
+  "baseDelaySeconds": 5,
+  "backoffFactor": 2.0,
+  "maxBackoffSeconds": 600,
+  "jitterMs": 1000,
+  "timeoutSeconds": 30
+}
+```
+
+**Push Notifications:**
+```json
+{
+  "serviceOrigin": "orders",
+  "channel": "push",
+  "maxAttempts": 3,
+  "baseDelaySeconds": 2,
+  "backoffFactor": 2.0,
+  "maxBackoffSeconds": 300,
+  "jitterMs": 500,
+  "timeoutSeconds": 15
+}
+```
+
+**Exponential Backoff with Jitter (.NET 9):**
+```csharp
+namespace Listo.Notification.Infrastructure.Retry;
+
+public class ExponentialBackoffWithJitter
+{
+    private readonly Random _random = new();
+    
+    public TimeSpan CalculateDelay(
+        int attemptNumber,
+        int baseDelaySeconds,
+        double backoffFactor,
+        int maxBackoffSeconds,
+        int jitterMs)
+    {
+        // Exponential backoff: baseDelay * (backoffFactor ^ attemptNumber)
+        var exponentialDelay = baseDelaySeconds * Math.Pow(backoffFactor, attemptNumber);
+        
+        // Cap at max backoff
+        var cappedDelay = Math.Min(exponentialDelay, maxBackoffSeconds);
+        
+        // Add random jitter to prevent thundering herd
+        var jitterSeconds = _random.Next(0, jitterMs) / 1000.0;
+        
+        var totalDelay = cappedDelay + jitterSeconds;
+        
+        return TimeSpan.FromSeconds(totalDelay);
+    }
+    
+    public async Task<TResult> ExecuteWithRetryAsync<TResult>(
+        Func<Task<TResult>> operation,
+        RetryPolicy policy,
+        CancellationToken cancellationToken = default)
+    {
+        Exception? lastException = null;
+        
+        for (int attempt = 0; attempt < policy.MaxAttempts; attempt++)
+        {
+            try
+            {
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(policy.TimeoutSeconds));
+                using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, cts.Token);
+                
+                return await operation().WaitAsync(linked.Token);
+            }
+            catch (Exception ex) when (attempt < policy.MaxAttempts - 1)
+            {
+                lastException = ex;
+                
+                var delay = CalculateDelay(
+                    attempt,
+                    policy.BaseDelaySeconds,
+                    policy.BackoffFactor,
+                    policy.MaxBackoffSeconds,
+                    policy.JitterMs
+                );
+                
+                await Task.Delay(delay, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                lastException = ex;
+            }
+        }
+        
+        throw new RetryExhaustedException(
+            $"Operation failed after {policy.MaxAttempts} attempts",
+            lastException
+        );
+    }
+}
+
+public record RetryPolicy(
+    int MaxAttempts,
+    int BaseDelaySeconds,
+    double BackoffFactor,
+    int MaxBackoffSeconds,
+    int JitterMs,
+    int TimeoutSeconds
+);
+```
+
+---
+
+### 8.3. Provider Failover Strategy
+
+**Failover Configuration:**
+
+**SMS Channel:**
+- **Primary:** Twilio (US/Canada/International)
+- **Secondary:** AWS SNS (US/Canada fallback)
+- **Circuit Breaker:** 5 consecutive failures → open for 60 seconds
+- **Health Check:** Probe every 30 seconds when circuit open
+
+**Email Channel:**
+- **Primary:** SendGrid
+- **Secondary:** Azure Communication Services
+- **Circuit Breaker:** 5 consecutive failures → open for 60 seconds
+- **Health Check:** Probe every 30 seconds when circuit open
+
+**Push Channel:**
+- **Primary:** Firebase Cloud Messaging (FCM)
+- **Secondary:** None (FCM has high availability)
+- **Circuit Breaker:** 10 consecutive failures → open for 120 seconds
+
+**Circuit Breaker Implementation:**
+```csharp
+using Polly;
+using Polly.CircuitBreaker;
+
+namespace Listo.Notification.Infrastructure.CircuitBreaker;
+
+public class ProviderCircuitBreakerFactory
+{
+    private readonly Dictionary<string, AsyncCircuitBreakerPolicy> _breakers = new();
+    private readonly ILogger<ProviderCircuitBreakerFactory> _logger;
+    
+    public AsyncCircuitBreakerPolicy GetOrCreate(string providerName, CircuitBreakerConfig config)
+    {
+        if (_breakers.TryGetValue(providerName, out var breaker))
+        {
+            return breaker;
+        }
+        
+        var newBreaker = Policy
+            .Handle<Exception>()
+            .AdvancedCircuitBreakerAsync(
+                failureThreshold: config.FailureThreshold, // 0.5 = 50% failures
+                samplingDuration: TimeSpan.FromSeconds(config.SamplingDurationSeconds),
+                minimumThroughput: config.MinimumThroughput, // min requests to evaluate
+                durationOfBreak: TimeSpan.FromSeconds(config.BreakDurationSeconds),
+                onBreak: (exception, duration) =>
+                {
+                    _logger.LogError(
+                        "Circuit breaker opened for {Provider}. Duration: {Duration}s. Exception: {Exception}",
+                        providerName, duration.TotalSeconds, exception.Message
+                    );
+                },
+                onReset: () =>
+                {
+                    _logger.LogInformation("Circuit breaker reset for {Provider}", providerName);
+                },
+                onHalfOpen: () =>
+                {
+                    _logger.LogInformation("Circuit breaker half-open for {Provider}", providerName);
+                }
+            );
+        
+        _breakers[providerName] = newBreaker;
+        return newBreaker;
+    }
+}
+
+public record CircuitBreakerConfig(
+    double FailureThreshold,
+    int SamplingDurationSeconds,
+    int MinimumThroughput,
+    int BreakDurationSeconds
+);
+```
+
+**Failover Flow:**
+```mermaid
+flowchart TD
+    A[Notification Request] --> B{Primary Provider Available?}
+    B -->|Circuit Closed| C[Attempt Primary]
+    B -->|Circuit Open| D{Secondary Configured?}
+    C -->|Success| E[Log Success]
+    C -->|Failure| F{Max Retries Reached?}
+    F -->|No| G[Exponential Backoff]
+    G --> C
+    F -->|Yes| H[Open Circuit]
+    H --> D
+    D -->|Yes| I[Attempt Secondary]
+    D -->|No| J[Mark Failed - Queue for Retry]
+    I -->|Success| K[Log Failover Event]
+    I -->|Failure| J
+    E --> L[Update NotificationQueue]
+    K --> L
+    J --> M[Publish Failed Event]
+```
+
+---
+
+### 8.4. Webhook Handlers
+
+**8.4.1. Twilio SMS Status Webhooks**
+
+**Endpoint:** `POST /api/v1/webhooks/twilio/sms-status`
+
+**Signature Validation:**
+```csharp
+using System.Security.Cryptography;
+using System.Text;
+
+public class TwilioWebhookValidator
+{
+    private readonly string _authToken;
+    
+    public bool ValidateSignature(HttpRequest request, string twilioSignature)
+    {
+        var url = $"{request.Scheme}://{request.Host}{request.Path}{request.QueryString}";
+        var data = new StringBuilder(url);
+        
+        // Add all POST parameters in alphabetical order
+        foreach (var key in request.Form.Keys.OrderBy(k => k))
+        {
+            data.Append(key).Append(request.Form[key]);
+        }
+        
+        using var hmac = new HMACSHA1(Encoding.UTF8.GetBytes(_authToken));
+        var hash = hmac.ComputeHash(Encoding.UTF8.GetBytes(data.ToString()));
+        var expectedSignature = Convert.ToBase64String(hash);
+        
+        return CryptographicOperations.FixedTimeEquals(
+            Encoding.UTF8.GetBytes(expectedSignature),
+            Encoding.UTF8.GetBytes(twilioSignature)
+        );
+    }
+}
+```
+
+**Event Types:**
+- `queued`, `sent`, `delivered`, `failed`, `undelivered`
+
+**8.4.2. SendGrid Event Webhooks**
+
+**Endpoint:** `POST /api/v1/webhooks/sendgrid/events`
+
+**Event Types:**
+- `delivered`, `opened`, `clicked`, `bounce`, `dropped`, `spam_report`, `unsubscribe`
+
+**Signature Validation:**
+```csharp
+public class SendGridWebhookValidator
+{
+    public bool ValidateSignature(
+        string publicKey,
+        string signature,
+        string timestamp,
+        string payload)
+    {
+        using var ecdsa = ECDsa.Create();
+        ecdsa.ImportSubjectPublicKeyInfo(Convert.FromBase64String(publicKey), out _);
+        
+        var dataToVerify = Encoding.UTF8.GetBytes(timestamp + payload);
+        var signatureBytes = Convert.FromBase64String(signature);
+        
+        return ecdsa.VerifyData(dataToVerify, signatureBytes, HashAlgorithmName.SHA256);
+    }
+}
+```
+
+**8.4.3. FCM Delivery Receipts (GCP Pub/Sub)**
+
+**Endpoint:** `POST /api/v1/webhooks/fcm/events`
+
+**Setup:**
+1. Configure GCP Pub/Sub topic: `fcm-delivery-receipts`
+2. Create push subscription to `/api/v1/webhooks/fcm/events`
+3. Verify JWT signature from GCP
+
+**Event Types:**
+- `MESSAGE_DELIVERED`, `MESSAGE_CLICKED`, `MESSAGE_EXPIRED`
+
+---
+
+### 8.5. Template Rendering with Scriban
+
+**Template Engine:** Scriban (Liquid-like syntax)
+
+**Localization Fallback Strategy:**
+1. Try exact locale (e.g., `en-US`)
+2. Try language only (e.g., `en`)
+3. Fall back to `en-US` (default)
+
+**Template Example:**
+```liquid
+Hi {{user.firstName}},
+
+Your order {{order.id}} has been confirmed!
+
+{{ if order.estimatedDelivery }}
+Estimated delivery: {{order.estimatedDelivery | date.format "%B %d at %I:%M %p"}}
+{{ end }}
+
+Total: {{order.total | currency}}
+
+Track your order: {{order.trackingLink}}
+
+Thank you,
+The {{company.name}} Team
+```
+
+**Safe Rendering (.NET 9):**
+```csharp
+using Scriban;
+using Scriban.Runtime;
+
+public class TemplateRenderer
+{
+    public async Task<string> RenderAsync(
+        string templateBody,
+        Dictionary<string, object> variables,
+        string locale)
+    {
+        var template = Template.Parse(templateBody);
+        
+        if (template.HasErrors)
+        {
+            throw new TemplateParsingException(
+                string.Join(", ", template.Messages.Select(m => m.Message))
+            );
+        }
+        
+        var context = new TemplateContext
+        {
+            EnableRelaxedMemberAccess = true,
+            StrictVariables = true // Throw on missing variables
+        };
+        
+        // Add custom functions
+        var scriptObject = new ScriptObject();
+        scriptObject.Import(typeof(CustomFunctions));
+        context.PushGlobal(scriptObject);
+        
+        // Add variables
+        foreach (var (key, value) in variables)
+        {
+            context.SetValue(new ScriptVariable(key), value);
+        }
+        
+        // Render with escaping enabled
+        return await template.RenderAsync(context);
+    }
+}
+```
+
+---
+
+### 8.6. Delivery Orchestration Flow
+
+```mermaid
+sequenceDiagram
+    participant API as Notification API
+    participant Queue as Service Bus Queue
+    participant Func as Azure Function
+    participant RateLimit as Rate Limiter
+    participant CircuitBreaker as Circuit Breaker
+    participant Primary as Primary Provider
+    participant Secondary as Secondary Provider
+    participant Webhook as Webhook Handler
+    
+    API->>Queue: Enqueue Notification
+    Queue->>Func: Trigger Function
+    Func->>RateLimit: Check Rate Limit
+    alt Rate Limit Exceeded
+        RateLimit-->>Func: 429 Denied
+        Func->>Queue: Requeue with Delay
+    else Rate Limit OK
+        RateLimit-->>Func: Allowed
+        Func->>CircuitBreaker: Check Circuit State
+        alt Circuit Open
+            CircuitBreaker-->>Func: Use Secondary
+            Func->>Secondary: Send Notification
+            Secondary-->>Func: Response
+        else Circuit Closed
+            CircuitBreaker-->>Func: Use Primary
+            Func->>Primary: Send Notification
+            alt Primary Success
+                Primary-->>Func: Success
+                Func->>Func: Log Delivery
+            else Primary Failure
+                Primary-->>Func: Error
+                Func->>CircuitBreaker: Record Failure
+                alt Should Retry
+                    Func->>Queue: Requeue with Backoff
+                else Max Retries
+                    Func->>Secondary: Attempt Failover
+                end
+            end
+        end
+    end
+    Primary->>Webhook: Delivery Status Update
+    Webhook->>Func: Process Webhook
+    Func->>Func: Update NotificationQueue Status
+```
+
+---
+
+## 9. API Implementation
 
 This section outlines the API layer structure, controller design, endpoint implementations, and integration with the application and infrastructure layers.
 
-### 7.1. Project Structure
+### 9.1. Project Structure
 
 ```
 Listo.Notification/
@@ -1970,7 +3108,7 @@ Listo.Notification/
 
 ---
 
-### 7.2. Controller Design Patterns
+### 9.2. Controller Design Patterns
 
 #### Base Controller
 
@@ -2050,7 +3188,7 @@ public abstract class ApiControllerBase : ControllerBase
 
 ---
 
-### 7.3. NotificationsController Implementation
+### 9.3. NotificationsController Implementation
 
 ```csharp
 using Microsoft.AspNetCore.Authorization;
@@ -2188,7 +3326,7 @@ public class NotificationsController : ApiControllerBase
 
 ---
 
-### 7.4. Internal NotificationsController (Service-to-Service)
+### 9.4. Internal NotificationsController (Service-to-Service)
 
 ```csharp
 using Microsoft.AspNetCore.Mvc;
@@ -2278,7 +3416,7 @@ public class InternalNotificationsController : ApiControllerBase
 
 ---
 
-### 7.5. DevicesController Implementation
+### 9.5. DevicesController Implementation
 
 ```csharp
 using Microsoft.AspNetCore.Authorization;
@@ -2387,7 +3525,7 @@ public class DevicesController : ApiControllerBase
 
 ---
 
-### 7.6. ConversationsController Implementation
+### 9.6. ConversationsController Implementation
 
 ```csharp
 using Microsoft.AspNetCore.Authorization;
@@ -2550,7 +3688,7 @@ public class ConversationsController : ApiControllerBase
 
 ---
 
-### 7.7. PreferencesController Implementation
+### 9.7. PreferencesController Implementation
 
 ```csharp
 using Microsoft.AspNetCore.Authorization;
@@ -2619,7 +3757,7 @@ public class PreferencesController : ApiControllerBase
 
 ---
 
-### 7.8. AnalyticsController Implementation
+### 9.8. AnalyticsController Implementation
 
 ```csharp
 using Microsoft.AspNetCore.Authorization;
@@ -2680,7 +3818,7 @@ public class AnalyticsController : ApiControllerBase
 
 ---
 
-### 7.9. HealthController Implementation
+### 9.9. HealthController Implementation
 
 ```csharp
 using Microsoft.AspNetCore.Mvc;
@@ -2746,7 +3884,7 @@ public class HealthController : ControllerBase
 
 ---
 
-### 7.10. Application Layer Service Example
+### 9.10. Application Layer Service Example
 
 ```csharp
 using Listo.Notification.Application.Services.Interfaces;
@@ -2980,7 +4118,7 @@ public class NotificationService : INotificationService
 
 ---
 
-### 7.11. Middleware Implementation
+### 9.11. Middleware Implementation
 
 #### ExceptionHandlingMiddleware
 
@@ -3117,7 +4255,7 @@ public class ServiceAuthenticationMiddleware
 
 ---
 
-### 7.12. Program.cs Configuration
+### 9.12. Program.cs Configuration
 
 ```csharp
 using Listo.Notification.API.Extensions;
@@ -3205,7 +4343,7 @@ app.Run();
 
 ---
 
-### 7.13. API Response Models
+### 9.13. API Response Models
 
 ```csharp
 namespace Listo.Notification.API.Models.Responses;
@@ -3246,11 +4384,11 @@ public class PaginatedResponse<T>
 
 ---
 
-## 8. Validation & Error Handling
+## 10. Validation & Error Handling
 
 This section covers comprehensive input validation, error handling patterns, and consistent response formatting.
 
-### 8.1. FluentValidation Setup
+### 10.1. FluentValidation Setup
 
 **Installation:**
 ```bash
@@ -3275,7 +4413,7 @@ builder.Services.Configure<ApiBehaviorOptions>(options =>
 
 ---
 
-### 8.2. Request Validators
+### 10.2. Request Validators
 
 #### SendNotificationRequestValidator
 
@@ -3436,7 +4574,7 @@ public class QueueNotificationRequestValidator : AbstractValidator<QueueNotifica
 
 ---
 
-### 8.3. Validation Filter Attribute
+### 10.3. Validation Filter Attribute
 
 ```csharp
 using Microsoft.AspNetCore.Mvc;
@@ -3484,7 +4622,7 @@ public async Task<IActionResult> SendNotification([FromBody] SendNotificationReq
 
 ---
 
-### 8.4. Custom Exception Types
+### 10.4. Custom Exception Types
 
 ```csharp
 namespace Listo.Notification.Application.Exceptions;
@@ -3570,7 +4708,7 @@ public class ProviderException : NotificationException
 
 ---
 
-### 8.5. Enhanced Exception Handling Middleware
+### 10.5. Enhanced Exception Handling Middleware
 
 ```csharp
 using System.Net;
@@ -3719,7 +4857,7 @@ public class ExceptionHandlingMiddleware
 
 ---
 
-### 8.6. Result Pattern Implementation
+### 10.6. Result Pattern Implementation
 
 ```csharp
 namespace Listo.Notification.Application.Common;
@@ -3792,7 +4930,7 @@ public enum ErrorType
 
 ---
 
-### 8.7. Validation Summary
+### 10.7. Validation Summary
 
 **Validation Layers:**
 1. **Request DTOs:** DataAnnotations for basic validation
@@ -3835,11 +4973,11 @@ X-RateLimit-Reset: 1705392000
 
 ---
 
-## 9. Notification Sending Integrations
+## 11. Notification Sending Integrations
 
 This section details the implementation of notification providers for Push, SMS, and Email channels.
 
-### 9.1. Firebase Cloud Messaging (FCM) Integration
+### 11.1. Firebase Cloud Messaging (FCM) Integration
 
 **Installation:**
 ```bash
@@ -4018,7 +5156,7 @@ public class FcmPushProvider : IFcmPushProvider
 
 ---
 
-### 9.2. Twilio SMS Integration
+### 11.2. Twilio SMS Integration
 
 **Installation:**
 ```bash
@@ -4147,7 +5285,7 @@ public class TwilioSmsProvider : ITwilioSmsProvider
 
 ---
 
-### 9.3. SendGrid Email Integration
+### 11.3. SendGrid Email Integration
 
 **Installation:**
 ```bash
@@ -4286,7 +5424,7 @@ public class SendGridEmailProvider : IEmailProvider
 
 ---
 
-### 9.4. Provider Result Models
+### 11.4. Provider Result Models
 
 ```csharp
 namespace Listo.Notification.Infrastructure.Providers.Models;
@@ -4334,7 +5472,7 @@ public class BatchEmailSendResult
 
 ---
 
-### 9.5. Retry Logic with Polly
+### 11.5. Retry Logic with Polly
 
 **Installation:**
 ```bash
@@ -4380,11 +5518,11 @@ public static class PollyPolicies
 
 ---
 
-## 10. File & Image Upload Handling
+## 12. File & Image Upload Handling
 
 This section covers file upload to Azure Blob Storage for in-app messaging attachments.
 
-### 10.1. Azure Blob Storage Configuration
+### 12.1. Azure Blob Storage Configuration
 
 **Installation:**
 ```bash
@@ -4406,7 +5544,7 @@ dotnet add package Azure.Storage.Blobs
 
 ---
 
-### 10.2. Blob Storage Service Implementation
+### 12.2. Blob Storage Service Implementation
 
 ```csharp
 using Azure.Storage.Blobs;
@@ -4594,7 +5732,7 @@ public class FileUploadResult
 
 ---
 
-### 10.3. File Upload Security Middleware
+### 12.3. File Upload Security Middleware
 
 ```csharp
 using Microsoft.AspNetCore.Http.Features;
@@ -4648,11 +5786,11 @@ public class FileUploadSecurityMiddleware
 
 ---
 
-## 11. Testing Strategy
+## 13. Testing Strategy
 
 This section covers unit testing, integration testing, and test automation.
 
-### 11.1. Unit Testing Setup
+### 13.1. Unit Testing Setup
 
 **Installation:**
 ```bash
@@ -4663,7 +5801,7 @@ dotnet add package FluentAssertions
 dotnet add package Microsoft.EntityFrameworkCore.InMemory
 ```
 
-### 11.2. Unit Test Examples
+### 13.2. Unit Test Examples
 
 #### NotificationService Tests
 
@@ -4770,7 +5908,7 @@ public class NotificationServiceTests
 
 ---
 
-### 11.3. Integration Testing Setup
+### 13.3. Integration Testing Setup
 
 **Installation:**
 ```bash
@@ -4897,7 +6035,7 @@ public class NotificationsControllerTests : IntegrationTestBase
 
 ---
 
-### 11.4. Test Coverage Configuration
+### 13.4. Test Coverage Configuration
 
 **coverlet.runsettings:**
 ```xml
@@ -4927,11 +6065,11 @@ reportgenerator -reports:**/coverage.cobertura.xml -targetdir:coverage-report -r
 
 ---
 
-## 12. Containerization
+## 14. Containerization
 
 This section covers Docker containerization and deployment configuration.
 
-### 12.1. Dockerfile
+### 14.1. Dockerfile
 
 ```dockerfile
 # Build stage
@@ -4975,7 +6113,7 @@ ENTRYPOINT ["dotnet", "Listo.Notification.API.dll"]
 
 ---
 
-### 12.2. .dockerignore
+### 14.2. .dockerignore
 
 ```
 **/.dockerignore
@@ -5006,7 +6144,7 @@ README.md
 
 ---
 
-### 12.3. docker-compose.yml (for local development)
+### 14.3. docker-compose.yml (for local development)
 
 ```yaml
 version: '3.8'
@@ -5063,7 +6201,7 @@ networks:
 
 ---
 
-### 12.4. Environment Configuration
+### 14.4. Environment Configuration
 
 **.env.example:**
 ```bash
@@ -5105,11 +6243,11 @@ SERILOG__MINIMUMLEVEL=Information
 
 ---
 
-## 13. Azure Deployment
+## 15. Azure Deployment
 
 This section covers comprehensive Azure deployment configuration using Infrastructure as Code (IaC).
 
-### 13.1. Azure Resources Overview
+### 15.1. Azure Resources Overview
 
 **Required Resources:**
 - Azure Container Registry (ACR)
@@ -5125,7 +6263,7 @@ This section covers comprehensive Azure deployment configuration using Infrastru
 
 ---
 
-### 13.2. Bicep Infrastructure Configuration
+### 15.2. Bicep Infrastructure Configuration
 
 **main.bicep:**
 ```bicep
@@ -5298,7 +6436,7 @@ output sqlServerFqdn string = sqlDatabase.outputs.serverFqdn
 
 ---
 
-### 13.3. Container App Module (modules/container-app.bicep)
+### 15.3. Container App Module (modules/container-app.bicep)
 
 ```bicep
 param location string
@@ -5418,7 +6556,7 @@ output id string = containerApp.id
 
 ---
 
-### 13.4. Deployment Script
+### 15.4. Deployment Script
 
 **deploy.sh:**
 ```bash
@@ -5483,7 +6621,7 @@ echo "Deployment complete!"
 
 ---
 
-### 13.5. Health Check Configuration
+### 15.5. Health Check Configuration
 
 **Health Check Endpoint Implementation:**
 ```csharp
@@ -5618,14 +6756,14 @@ app.MapHealthChecks("/health/ready", new HealthCheckOptions
 
 ---
 
-## 14. Documentation
+## 16. Documentation
 
 - **Swagger/OpenAPI:** Use Swashbuckle to generate and expose API docs.
 - **README:** Document setup, environment variables, and deployment steps.
 
 ---
 
-## 15. CI/CD Pipeline
+## 17. CI/CD Pipeline
 
 - **Build & Test:** Use GitHub Actions or Azure DevOps for build, test, and lint.
 - **Container Build:** Build and push Docker image on merge to main.
@@ -5633,7 +6771,7 @@ app.MapHealthChecks("/health/ready", new HealthCheckOptions
 
 ---
 
-## 16. Security
+## 18. Security
 
 - **Secrets:** Store sensitive data in Azure Key Vault.
 - **HTTPS:** Enforce HTTPS in production.
@@ -5643,7 +6781,7 @@ app.MapHealthChecks("/health/ready", new HealthCheckOptions
 
 ---
 
-## 17. Maintenance & Future Enhancements
+## 19. Maintenance & Future Enhancements
 
 - **Versioning:** Plan for future API versions.
 - **Performance:** Monitor and optimize queries and indexes.
