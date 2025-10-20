@@ -113,19 +113,31 @@
 
 ## 📋 Remaining Tasks
 
-### Phase 3: Core Service Logic (Not Started)
-- [ ] **Section 5: Authentication & Authorization**
-  - [ ] JWT validation from Listo.Auth
-  - [ ] Service-to-service shared secret management
-  - [ ] Key rotation guidance
-  - [ ] HTTPS, HSTS enforcement
-  - [ ] Input validation and request limits
+### Phase 3: Core Service Logic (In Progress)
 
-- [ ] **Section 6: Service-Specific Event Mappings**
-  - [ ] Listo.Auth events (EmailVerification, PasswordReset, 2FA, SuspiciousLogin)
-  - [ ] Listo.Orders events (OrderConfirmed, StatusUpdated, DriverAssigned, DeliveryCompleted)
-  - [ ] Listo.RideSharing events (RideBooked, DriverAssigned, DriverArriving, RideCompleted)
-  - [ ] For each: channels, templateKey, variables, priority, sync/async, example payloads
+#### ✅ Session 3 Completed (2025-01-20)
+- [x] **Section 5: Authentication & Authorization**
+  - [x] JWT validation from Listo.Auth
+  - [x] Service-to-service shared secret management
+  - [x] Key rotation guidance
+  - [x] HTTPS, HSTS enforcement
+  - [x] Input validation and request limits
+  - [x] Created ServiceSecretAuthenticationMiddleware
+  - [x] Created RequestValidationMiddleware
+  - [x] Created AUTHENTICATION_CONFIGURATION.md
+
+- [x] **Section 6: Service-Specific Event Mappings**
+  - [x] Listo.Auth events (EmailVerification, PasswordReset, 2FA, SuspiciousLogin)
+  - [x] Listo.Orders events (OrderConfirmed, StatusUpdated, DriverAssigned, DeliveryCompleted)
+  - [x] Listo.RideSharing events (RideBooked, DriverAssigned, DriverArriving, RideCompleted)
+  - [x] For each: channels, templateKey, variables, priority, sync/async, example payloads
+  - [x] Created SERVICE_EVENT_MAPPINGS.md with 12 event definitions
+
+#### ⏭️ Next Session
+- [ ] **Section 5: Authentication & Authorization** (remaining implementation)
+  - [ ] Register middlewares in Program.cs
+  - [ ] Add authorization policies
+  - [ ] Configure HTTPS/HSTS for production
 
 - [ ] **Section 7: Cost Management & Rate Limiting**
   - [ ] Redis token bucket implementation
@@ -266,17 +278,22 @@
 
 ## 📊 Progress Summary
 
-- **Overall Progress:** ~40% complete
-- **NOTIFICATION_MGMT_PLAN.md:** Sections 1-4 complete
+- **Overall Progress:** ~50% complete
+- **NOTIFICATION_MGMT_PLAN.md:** Sections 1-6 complete/documented
 - **Phase 1 (Foundation & Architecture):** ✅ Complete
 - **Phase 2 (Database & Data Models):** ✅ Complete
-- **Phase 3 (Core Service Logic):** ✅ Core Implementation Complete
+- **Phase 3 (Core Service Logic):** 🔄 50% Complete
   - Domain entities and enums: ✅ Complete
   - EF Core DbContext with multi-tenancy: ✅ Complete
   - Redis rate limiter with Lua scripts: ✅ Complete
   - SignalR Hubs (Notifications + Messaging): ✅ Complete
+  - Authentication & Authorization: ✅ Complete (middleware + docs)
+  - Service Event Mappings: ✅ Complete (12 events documented)
+  - Cost Management: ⏳ Remaining
+  - Delivery Strategy: ⏳ Remaining
+  - SignalR Config: ⏳ Remaining
 - **notification_api_endpoints.md:** Basic structure exists, needs comprehensive updates
-- **Estimated Completion:** Requires 3-4 more focused work sessions
+- **Estimated Completion:** Requires 2-3 more focused work sessions
 
 ---
 
@@ -300,6 +317,6 @@ git push origin feature/notification-specs-update
 
 ---
 
-**Last Updated:** 2025-01-20 (Session 2 - Phase 3 Core Implementation Complete)  
+**Last Updated:** 2025-01-20 (Session 3 - Auth & Event Mappings Complete)  
 **Branch:** `feature/notification-specs-update`  
-**Status:** Phase 3 Core Complete - Ready for Service Logic Implementation
+**Status:** Phase 3 50% Complete - Sections 5-6 Done, Sections 7-9 Remaining
