@@ -2543,11 +2543,507 @@ public class AdminOverrideService
 
 ---
 
-## 8. API Implementation
+## 8. Notification Delivery Strategy
+
+This section defines the delivery routing rules, retry policies with exponential backoff and jitter, provider failover strategies, webhook handlers, and template rendering.
+
+### 8.1. Synchronous vs Asynchronous Routing
+
+**Synchronous Delivery (< 2 second response):**
+- **Use Cases:** Driver assignment (Orders, RideSharing), OTP/2FA, Critical system alerts
+- **Timeout:** Hard timeout at 2 seconds
+- **Retry:** Single attempt or limited retries (max 2)
+- **Channels:** Push notifications + SignalR
+- **Implementation:** Direct HTTP call to provider APIs
+
+**Asynchronous Delivery (Queue-based):**
+- **Use Cases:** Order confirmations, marketing, receipts, non-critical notifications
+- **Timeout:** Configurable per channel (20-30 seconds)
+- **Retry:** Full exponential backoff policy (up to 6 attempts)
+- **Channels:** Email, SMS, Push (non-critical), In-App
+- **Implementation:** Azure Service Bus → Azure Function → Provider API
+
+**Priority Queue Tiers:**
+
+| Priority | Queue Name | Use Cases | Processing |
+|----------|------------|-----------|------------|
+| **High** | `listo-notifications-priority` | OTP/2FA, Driver assignment, Security alerts | Real-time, max 2s latency |
+| **Normal** | `listo-notifications-queue` | Order updates, Ride confirmations | Standard, max 30s latency |
+| **Low** | `listo-notifications-bulk` | Marketing, Newsletters, Batch notifications | Batched, up to 5min latency |
+
+**Routing Decision Logic:**
+```csharp
+public DeliveryMode DetermineDeliveryMode(NotificationRequest request)
+{
+    // Synchronous criteria
+    if (request.TemplateKey.Contains("driver_assign") || 
+        request.TemplateKey.Contains("otp") ||
+        request.TemplateKey.Contains("2fa") ||
+        request.Priority == "critical")
+    {
+        return DeliveryMode.Synchronous;
+    }
+    
+    // Priority queue
+    if (request.Priority == "high")
+    {
+        return DeliveryMode.PriorityQueue;
+    }
+    
+    // Bulk
+    if (request.IsBulk || request.Priority == "low")
+    {
+    return DeliveryMode.BulkQueue;
+    }
+    
+    // Default: standard async
+    return DeliveryMode.StandardQueue;
+}
+```
+
+---
+
+### 8.2. Channel-Specific Retry Policies
+
+**Retry Policy Configuration (from Section 4.3):**
+
+**OTP/SMS (Auth - High Priority):**
+```json
+{
+  "serviceOrigin": "auth",
+  "channel": "sms",
+  "maxAttempts": 4,
+  "baseDelaySeconds": 3,
+  "backoffFactor": 2.0,
+  "maxBackoffSeconds": 120,
+  "jitterMs": 1000,
+  "timeoutSeconds": 20
+}
+```
+
+**Email (Standard):**
+```json
+{
+  "serviceOrigin": "*",
+  "channel": "email",
+  "maxAttempts": 6,
+  "baseDelaySeconds": 5,
+  "backoffFactor": 2.0,
+  "maxBackoffSeconds": 600,
+  "jitterMs": 1000,
+  "timeoutSeconds": 30
+}
+```
+
+**Push Notifications:**
+```json
+{
+  "serviceOrigin": "orders",
+  "channel": "push",
+  "maxAttempts": 3,
+  "baseDelaySeconds": 2,
+  "backoffFactor": 2.0,
+  "maxBackoffSeconds": 300,
+  "jitterMs": 500,
+  "timeoutSeconds": 15
+}
+```
+
+**Exponential Backoff with Jitter (.NET 9):**
+```csharp
+namespace Listo.Notification.Infrastructure.Retry;
+
+public class ExponentialBackoffWithJitter
+{
+    private readonly Random _random = new();
+    
+    public TimeSpan CalculateDelay(
+        int attemptNumber,
+        int baseDelaySeconds,
+        double backoffFactor,
+        int maxBackoffSeconds,
+        int jitterMs)
+    {
+        // Exponential backoff: baseDelay * (backoffFactor ^ attemptNumber)
+        var exponentialDelay = baseDelaySeconds * Math.Pow(backoffFactor, attemptNumber);
+        
+        // Cap at max backoff
+        var cappedDelay = Math.Min(exponentialDelay, maxBackoffSeconds);
+        
+        // Add random jitter to prevent thundering herd
+        var jitterSeconds = _random.Next(0, jitterMs) / 1000.0;
+        
+        var totalDelay = cappedDelay + jitterSeconds;
+        
+        return TimeSpan.FromSeconds(totalDelay);
+    }
+    
+    public async Task<TResult> ExecuteWithRetryAsync<TResult>(
+        Func<Task<TResult>> operation,
+        RetryPolicy policy,
+        CancellationToken cancellationToken = default)
+    {
+        Exception? lastException = null;
+        
+        for (int attempt = 0; attempt < policy.MaxAttempts; attempt++)
+        {
+            try
+            {
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(policy.TimeoutSeconds));
+                using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, cts.Token);
+                
+                return await operation().WaitAsync(linked.Token);
+            }
+            catch (Exception ex) when (attempt < policy.MaxAttempts - 1)
+            {
+                lastException = ex;
+                
+                var delay = CalculateDelay(
+                    attempt,
+                    policy.BaseDelaySeconds,
+                    policy.BackoffFactor,
+                    policy.MaxBackoffSeconds,
+                    policy.JitterMs
+                );
+                
+                await Task.Delay(delay, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                lastException = ex;
+            }
+        }
+        
+        throw new RetryExhaustedException(
+            $"Operation failed after {policy.MaxAttempts} attempts",
+            lastException
+        );
+    }
+}
+
+public record RetryPolicy(
+    int MaxAttempts,
+    int BaseDelaySeconds,
+    double BackoffFactor,
+    int MaxBackoffSeconds,
+    int JitterMs,
+    int TimeoutSeconds
+);
+```
+
+---
+
+### 8.3. Provider Failover Strategy
+
+**Failover Configuration:**
+
+**SMS Channel:**
+- **Primary:** Twilio (US/Canada/International)
+- **Secondary:** AWS SNS (US/Canada fallback)
+- **Circuit Breaker:** 5 consecutive failures → open for 60 seconds
+- **Health Check:** Probe every 30 seconds when circuit open
+
+**Email Channel:**
+- **Primary:** SendGrid
+- **Secondary:** Azure Communication Services
+- **Circuit Breaker:** 5 consecutive failures → open for 60 seconds
+- **Health Check:** Probe every 30 seconds when circuit open
+
+**Push Channel:**
+- **Primary:** Firebase Cloud Messaging (FCM)
+- **Secondary:** None (FCM has high availability)
+- **Circuit Breaker:** 10 consecutive failures → open for 120 seconds
+
+**Circuit Breaker Implementation:**
+```csharp
+using Polly;
+using Polly.CircuitBreaker;
+
+namespace Listo.Notification.Infrastructure.CircuitBreaker;
+
+public class ProviderCircuitBreakerFactory
+{
+    private readonly Dictionary<string, AsyncCircuitBreakerPolicy> _breakers = new();
+    private readonly ILogger<ProviderCircuitBreakerFactory> _logger;
+    
+    public AsyncCircuitBreakerPolicy GetOrCreate(string providerName, CircuitBreakerConfig config)
+    {
+        if (_breakers.TryGetValue(providerName, out var breaker))
+        {
+            return breaker;
+        }
+        
+        var newBreaker = Policy
+            .Handle<Exception>()
+            .AdvancedCircuitBreakerAsync(
+                failureThreshold: config.FailureThreshold, // 0.5 = 50% failures
+                samplingDuration: TimeSpan.FromSeconds(config.SamplingDurationSeconds),
+                minimumThroughput: config.MinimumThroughput, // min requests to evaluate
+                durationOfBreak: TimeSpan.FromSeconds(config.BreakDurationSeconds),
+                onBreak: (exception, duration) =>
+                {
+                    _logger.LogError(
+                        "Circuit breaker opened for {Provider}. Duration: {Duration}s. Exception: {Exception}",
+                        providerName, duration.TotalSeconds, exception.Message
+                    );
+                },
+                onReset: () =>
+                {
+                    _logger.LogInformation("Circuit breaker reset for {Provider}", providerName);
+                },
+                onHalfOpen: () =>
+                {
+                    _logger.LogInformation("Circuit breaker half-open for {Provider}", providerName);
+                }
+            );
+        
+        _breakers[providerName] = newBreaker;
+        return newBreaker;
+    }
+}
+
+public record CircuitBreakerConfig(
+    double FailureThreshold,
+    int SamplingDurationSeconds,
+    int MinimumThroughput,
+    int BreakDurationSeconds
+);
+```
+
+**Failover Flow:**
+```mermaid
+flowchart TD
+    A[Notification Request] --> B{Primary Provider Available?}
+    B -->|Circuit Closed| C[Attempt Primary]
+    B -->|Circuit Open| D{Secondary Configured?}
+    C -->|Success| E[Log Success]
+    C -->|Failure| F{Max Retries Reached?}
+    F -->|No| G[Exponential Backoff]
+    G --> C
+    F -->|Yes| H[Open Circuit]
+    H --> D
+    D -->|Yes| I[Attempt Secondary]
+    D -->|No| J[Mark Failed - Queue for Retry]
+    I -->|Success| K[Log Failover Event]
+    I -->|Failure| J
+    E --> L[Update NotificationQueue]
+    K --> L
+    J --> M[Publish Failed Event]
+```
+
+---
+
+### 8.4. Webhook Handlers
+
+**8.4.1. Twilio SMS Status Webhooks**
+
+**Endpoint:** `POST /api/v1/webhooks/twilio/sms-status`
+
+**Signature Validation:**
+```csharp
+using System.Security.Cryptography;
+using System.Text;
+
+public class TwilioWebhookValidator
+{
+    private readonly string _authToken;
+    
+    public bool ValidateSignature(HttpRequest request, string twilioSignature)
+    {
+        var url = $"{request.Scheme}://{request.Host}{request.Path}{request.QueryString}";
+        var data = new StringBuilder(url);
+        
+        // Add all POST parameters in alphabetical order
+        foreach (var key in request.Form.Keys.OrderBy(k => k))
+        {
+            data.Append(key).Append(request.Form[key]);
+        }
+        
+        using var hmac = new HMACSHA1(Encoding.UTF8.GetBytes(_authToken));
+        var hash = hmac.ComputeHash(Encoding.UTF8.GetBytes(data.ToString()));
+        var expectedSignature = Convert.ToBase64String(hash);
+        
+        return CryptographicOperations.FixedTimeEquals(
+            Encoding.UTF8.GetBytes(expectedSignature),
+            Encoding.UTF8.GetBytes(twilioSignature)
+        );
+    }
+}
+```
+
+**Event Types:**
+- `queued`, `sent`, `delivered`, `failed`, `undelivered`
+
+**8.4.2. SendGrid Event Webhooks**
+
+**Endpoint:** `POST /api/v1/webhooks/sendgrid/events`
+
+**Event Types:**
+- `delivered`, `opened`, `clicked`, `bounce`, `dropped`, `spam_report`, `unsubscribe`
+
+**Signature Validation:**
+```csharp
+public class SendGridWebhookValidator
+{
+    public bool ValidateSignature(
+        string publicKey,
+        string signature,
+        string timestamp,
+        string payload)
+    {
+        using var ecdsa = ECDsa.Create();
+        ecdsa.ImportSubjectPublicKeyInfo(Convert.FromBase64String(publicKey), out _);
+        
+        var dataToVerify = Encoding.UTF8.GetBytes(timestamp + payload);
+        var signatureBytes = Convert.FromBase64String(signature);
+        
+        return ecdsa.VerifyData(dataToVerify, signatureBytes, HashAlgorithmName.SHA256);
+    }
+}
+```
+
+**8.4.3. FCM Delivery Receipts (GCP Pub/Sub)**
+
+**Endpoint:** `POST /api/v1/webhooks/fcm/events`
+
+**Setup:**
+1. Configure GCP Pub/Sub topic: `fcm-delivery-receipts`
+2. Create push subscription to `/api/v1/webhooks/fcm/events`
+3. Verify JWT signature from GCP
+
+**Event Types:**
+- `MESSAGE_DELIVERED`, `MESSAGE_CLICKED`, `MESSAGE_EXPIRED`
+
+---
+
+### 8.5. Template Rendering with Scriban
+
+**Template Engine:** Scriban (Liquid-like syntax)
+
+**Localization Fallback Strategy:**
+1. Try exact locale (e.g., `en-US`)
+2. Try language only (e.g., `en`)
+3. Fall back to `en-US` (default)
+
+**Template Example:**
+```liquid
+Hi {{user.firstName}},
+
+Your order {{order.id}} has been confirmed!
+
+{{ if order.estimatedDelivery }}
+Estimated delivery: {{order.estimatedDelivery | date.format "%B %d at %I:%M %p"}}
+{{ end }}
+
+Total: {{order.total | currency}}
+
+Track your order: {{order.trackingLink}}
+
+Thank you,
+The {{company.name}} Team
+```
+
+**Safe Rendering (.NET 9):**
+```csharp
+using Scriban;
+using Scriban.Runtime;
+
+public class TemplateRenderer
+{
+    public async Task<string> RenderAsync(
+        string templateBody,
+        Dictionary<string, object> variables,
+        string locale)
+    {
+        var template = Template.Parse(templateBody);
+        
+        if (template.HasErrors)
+        {
+            throw new TemplateParsingException(
+                string.Join(", ", template.Messages.Select(m => m.Message))
+            );
+        }
+        
+        var context = new TemplateContext
+        {
+            EnableRelaxedMemberAccess = true,
+            StrictVariables = true // Throw on missing variables
+        };
+        
+        // Add custom functions
+        var scriptObject = new ScriptObject();
+        scriptObject.Import(typeof(CustomFunctions));
+        context.PushGlobal(scriptObject);
+        
+        // Add variables
+        foreach (var (key, value) in variables)
+        {
+            context.SetValue(new ScriptVariable(key), value);
+        }
+        
+        // Render with escaping enabled
+        return await template.RenderAsync(context);
+    }
+}
+```
+
+---
+
+### 8.6. Delivery Orchestration Flow
+
+```mermaid
+sequenceDiagram
+    participant API as Notification API
+    participant Queue as Service Bus Queue
+    participant Func as Azure Function
+    participant RateLimit as Rate Limiter
+    participant CircuitBreaker as Circuit Breaker
+    participant Primary as Primary Provider
+    participant Secondary as Secondary Provider
+    participant Webhook as Webhook Handler
+    
+    API->>Queue: Enqueue Notification
+    Queue->>Func: Trigger Function
+    Func->>RateLimit: Check Rate Limit
+    alt Rate Limit Exceeded
+        RateLimit-->>Func: 429 Denied
+        Func->>Queue: Requeue with Delay
+    else Rate Limit OK
+        RateLimit-->>Func: Allowed
+        Func->>CircuitBreaker: Check Circuit State
+        alt Circuit Open
+            CircuitBreaker-->>Func: Use Secondary
+            Func->>Secondary: Send Notification
+            Secondary-->>Func: Response
+        else Circuit Closed
+            CircuitBreaker-->>Func: Use Primary
+            Func->>Primary: Send Notification
+            alt Primary Success
+                Primary-->>Func: Success
+                Func->>Func: Log Delivery
+            else Primary Failure
+                Primary-->>Func: Error
+                Func->>CircuitBreaker: Record Failure
+                alt Should Retry
+                    Func->>Queue: Requeue with Backoff
+                else Max Retries
+                    Func->>Secondary: Attempt Failover
+                end
+            end
+        end
+    end
+    Primary->>Webhook: Delivery Status Update
+    Webhook->>Func: Process Webhook
+    Func->>Func: Update NotificationQueue Status
+```
+
+---
+
+## 9. API Implementation
 
 This section outlines the API layer structure, controller design, endpoint implementations, and integration with the application and infrastructure layers.
 
-### 7.1. Project Structure
+### 9.1. Project Structure
 
 ```
 Listo.Notification/
