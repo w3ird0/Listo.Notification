@@ -1,11 +1,16 @@
+using System.Text;
 using System.Threading.RateLimiting;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.IdentityModel.Tokens;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.OpenApi.Models;
 using Listo.Notification.Infrastructure.Data;
 using Listo.Notification.Application.Interfaces;
 using Listo.Notification.Infrastructure.Providers;
 using Microsoft.Extensions.Options;
+using Listo.Notification.API.Hubs;
+using Listo.Notification.API.Middleware;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -53,11 +58,64 @@ builder.Services.AddSwaggerGen(c =>
 builder.Services.AddDbContext<NotificationDbContext>(options =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
 
+// Configure JWT Authentication
+var jwtSettings = builder.Configuration.GetSection("JwtSettings");
+var secretKey = jwtSettings["SecretKey"] ?? throw new InvalidOperationException("JWT SecretKey not configured");
+var key = Encoding.ASCII.GetBytes(secretKey);
+
+builder.Services.AddAuthentication(options =>
+{
+    options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
+    options.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
+})
+.AddJwtBearer(options =>
+{
+    options.RequireHttpsMetadata = !builder.Environment.IsDevelopment();
+    options.SaveToken = true;
+    options.TokenValidationParameters = new TokenValidationParameters
+    {
+        ValidateIssuer = true,
+        ValidateAudience = true,
+        ValidateLifetime = true,
+        ValidateIssuerSigningKey = true,
+        ValidIssuer = jwtSettings["Issuer"],
+        ValidAudience = jwtSettings["Audience"],
+        IssuerSigningKey = new SymmetricSecurityKey(key),
+        ClockSkew = TimeSpan.Zero
+    };
+    
+    // Enable JWT authentication for SignalR
+    options.Events = new JwtBearerEvents
+    {
+        OnMessageReceived = context =>
+        {
+            var accessToken = context.Request.Query["access_token"];
+            var path = context.HttpContext.Request.Path;
+            
+            if (!string.IsNullOrEmpty(accessToken) && path.StartsWithSegments("/hubs"))
+            {
+                context.Token = accessToken;
+            }
+            
+            return Task.CompletedTask;
+        }
+    };
+});
+
+builder.Services.AddAuthorization();
+
 // Register notification providers
 builder.Services.Configure<TwilioOptions>(builder.Configuration.GetSection("Twilio"));
 builder.Services.Configure<SendGridOptions>(builder.Configuration.GetSection("SendGrid"));
 builder.Services.AddSingleton<ISmsProvider, TwilioSmsProvider>();
 builder.Services.AddSingleton<IEmailProvider, SendGridEmailProvider>();
+
+// Configure SignalR with Redis backplane
+builder.Services.AddSignalR()
+    .AddStackExchangeRedis(builder.Configuration.GetConnectionString("Redis") ?? "localhost:6379", options =>
+    {
+        options.Configuration.ChannelPrefix = "Listo.Notification";
+    });
 
 // Configure Rate Limiting
 builder.Services.AddRateLimiter(options =>
@@ -176,8 +234,15 @@ app.UseHttpsRedirection();
 // Enable rate limiting
 app.UseRateLimiter();
 
+app.UseAuthentication();
 app.UseAuthorization();
 
+// Set tenant context from JWT claims
+app.UseTenantContext();
+
 app.MapControllers();
+
+// Map SignalR hub
+app.MapHub<NotificationHub>("/hubs/notifications");
 
 app.Run();
