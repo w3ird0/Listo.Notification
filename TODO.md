@@ -393,7 +393,17 @@ git push origin feature/notification-specs-update
 
 ---
 
-**Last Updated:** 2025-10-20 (Session 5 - API Controllers, Validation & File Uploads Complete)  
+## ✅ Database Migrations (2025-10-20)
+- [x] Created migration: `20251020184830_PostInitialModelUpdates_20251020`
+  - Added soft delete support (IsDeleted, DeletedAt) to Notifications, NotificationQueue, Messages, AuditLog
+  - Created RateLimiting table with unique constraint on TenantId + ServiceOrigin + Channel
+  - Created RetryPolicy table with unique constraint on ServiceOrigin + Channel
+- [x] Applied all pending migrations to LocalDB (ListoNotification database)
+- [x] Verified database state: Both InitialCreate and PostInitialModelUpdates migrations applied successfully
+
+---
+
+**Last Updated:** 2025-10-20 (Session 5 - API Controllers, Validation & File Uploads Complete + Database Migrations)  
 **Branch:** `main`  
-**Status:** Phase 4 In Progress - API Layer Complete, Service Implementations Pending  
-**Commit:** `23df637` - feat(api): implement Section 10-13 API controllers, validation, and file uploads
+**Status:** Phase 4 In Progress - API Layer Complete, Database Migrations Applied, Service Implementations Pending  
+**Commit:** Pending - Migrations applied to LocalDB
