@@ -21,7 +21,7 @@ public class NotificationEntity
     /// <summary>
     /// Target user ID (null for broadcast notifications)
     /// </summary>
-    public string? UserId { get; set; }
+    public Guid UserId { get; set; }
 
     /// <summary>
     /// Service that originated this notification
@@ -49,7 +49,32 @@ public class NotificationEntity
     public Priority Priority { get; set; }
 
     /// <summary>
+    /// Recipient address (email, phone, or device token)
+    /// </summary>
+    public string Recipient { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Notification subject/title
+    /// </summary>
+    public string Subject { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Notification body/content
+    /// </summary>
+    public string Body { get; set; } = string.Empty;
+
+    /// <summary>
+    /// JSON metadata for additional context
+    /// </summary>
+    public string? Metadata { get; set; }
+
+    /// <summary>
     /// Scheduled delivery time (null for immediate delivery)
+    /// </summary>
+    public DateTime? ScheduledFor { get; set; }
+
+    /// <summary>
+    /// Scheduled delivery time for database
     /// </summary>
     public DateTime? ScheduledAt { get; set; }
 
@@ -57,6 +82,16 @@ public class NotificationEntity
     /// Actual send timestamp
     /// </summary>
     public DateTime? SentAt { get; set; }
+
+    /// <summary>
+    /// Delivery confirmation timestamp
+    /// </summary>
+    public DateTime? DeliveredAt { get; set; }
+
+    /// <summary>
+    /// When the notification was read by the user
+    /// </summary>
+    public DateTime? ReadAt { get; set; }
 
     /// <summary>
     /// External provider message ID (e.g., Twilio SID, SendGrid message ID)

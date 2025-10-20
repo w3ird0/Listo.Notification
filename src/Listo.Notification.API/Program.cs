@@ -104,6 +104,12 @@ builder.Services.AddAuthentication(options =>
 
 builder.Services.AddAuthorization();
 
+// Register repositories
+builder.Services.AddScoped<INotificationRepository, Listo.Notification.Infrastructure.Repositories.NotificationRepository>();
+
+// Register services
+builder.Services.AddScoped<INotificationService, Listo.Notification.Application.Services.NotificationService>();
+
 // Register notification providers
 builder.Services.Configure<TwilioOptions>(builder.Configuration.GetSection("Twilio"));
 builder.Services.Configure<SendGridOptions>(builder.Configuration.GetSection("SendGrid"));

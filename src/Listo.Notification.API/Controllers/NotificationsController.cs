@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Listo.Notification.Application.DTOs;
+using Listo.Notification.Application.Interfaces;
 using Listo.Notification.API.Middleware;
 using System.Security.Claims;
 
@@ -16,10 +17,14 @@ namespace Listo.Notification.API.Controllers;
 public class NotificationsController : ControllerBase
 {
     private readonly ILogger<NotificationsController> _logger;
+    private readonly INotificationService _notificationService;
 
-    public NotificationsController(ILogger<NotificationsController> logger)
+    public NotificationsController(
+        ILogger<NotificationsController> logger,
+        INotificationService notificationService)
     {
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _notificationService = notificationService ?? throw new ArgumentNullException(nameof(notificationService));
     }
 
     /// <summary>
@@ -41,14 +46,11 @@ public class NotificationsController : ControllerBase
             "Sending notification: TenantId={TenantId}, UserId={UserId}, Channel={Channel}",
             tenantId, userId, request.Channel);
 
-        // TODO: Implement notification service logic
-        var response = new SendNotificationResponse
-        {
-            NotificationId = Guid.NewGuid(),
-            Status = Domain.Enums.NotificationStatus.Queued,
-            Message = "Notification queued for delivery",
-            CreatedAt = DateTime.UtcNow
-        };
+        var response = await _notificationService.SendNotificationAsync(
+            tenantId,
+            userId,
+            request,
+            cancellationToken);
 
         return Ok(response);
     }
@@ -70,14 +72,12 @@ public class NotificationsController : ControllerBase
             "Fetching notifications: TenantId={TenantId}, UserId={UserId}, Page={Page}, PageSize={PageSize}",
             tenantId, userId, page, pageSize);
 
-        // TODO: Implement repository query
-        var response = new PagedNotificationsResponse
-        {
-            Items = Array.Empty<NotificationResponse>(),
-            TotalCount = 0,
-            PageNumber = page,
-            PageSize = pageSize
-        };
+        var response = await _notificationService.GetUserNotificationsAsync(
+            tenantId,
+            userId,
+            page,
+            pageSize,
+            cancellationToken);
 
         return Ok(response);
     }
@@ -98,8 +98,9 @@ public class NotificationsController : ControllerBase
             "Fetching notification: TenantId={TenantId}, NotificationId={NotificationId}",
             tenantId, id);
 
-        // TODO: Implement repository query
-        return NotFound();
+        var notification = await _notificationService.GetNotificationByIdAsync(tenantId, id, cancellationToken);
+        
+        return notification != null ? Ok(notification) : NotFound();
     }
 
     /// <summary>
@@ -119,8 +120,9 @@ public class NotificationsController : ControllerBase
             "Marking notification as read: TenantId={TenantId}, UserId={UserId}, NotificationId={NotificationId}",
             tenantId, userId, id);
 
-        // TODO: Implement mark as read logic
-        return NoContent();
+        var success = await _notificationService.MarkAsReadAsync(tenantId, userId, id, cancellationToken);
+        
+        return success ? NoContent() : NotFound();
     }
 
     /// <summary>
@@ -137,14 +139,7 @@ public class NotificationsController : ControllerBase
             "Fetching notification statistics: TenantId={TenantId}, UserId={UserId}",
             tenantId, userId);
 
-        // TODO: Implement statistics query
-        var stats = new
-        {
-            totalNotifications = 0,
-            unreadCount = 0,
-            byChannel = new Dictionary<string, int>(),
-            byStatus = new Dictionary<string, int>()
-        };
+        var stats = await _notificationService.GetUserStatisticsAsync(tenantId, userId, cancellationToken);
 
         return Ok(stats);
     }
