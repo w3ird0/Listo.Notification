@@ -148,21 +148,59 @@ builder.Services.AddAuthorization(options =>
 // Register repositories
 builder.Services.AddScoped<INotificationRepository, Listo.Notification.Infrastructure.Repositories.NotificationRepository>();
 
-// Register services
+// Register application services
 builder.Services.AddScoped<INotificationService, Listo.Notification.Application.Services.NotificationService>();
+builder.Services.AddScoped<Listo.Notification.Application.Services.RateLimitingService>();
+builder.Services.AddScoped<Listo.Notification.Application.Services.BudgetEnforcementService>();
+builder.Services.AddSingleton<Listo.Notification.Infrastructure.Services.RedisTokenBucketLimiter>();
 
 // Register notification providers
+builder.Services.AddSingleton<ISmsProvider, TwilioSmsProvider>();
+builder.Services.AddSingleton<IEmailProvider, SendGridEmailProvider>();
 builder.Services.Configure<TwilioOptions>(builder.Configuration.GetSection("Twilio"));
 builder.Services.Configure<SendGridOptions>(builder.Configuration.GetSection("SendGrid"));
 builder.Services.AddSingleton<ISmsProvider, TwilioSmsProvider>();
 builder.Services.AddSingleton<IEmailProvider, SendGridEmailProvider>();
 
-// Configure SignalR with Redis backplane
-builder.Services.AddSignalR()
-    .AddStackExchangeRedis(builder.Configuration.GetConnectionString("Redis") ?? "localhost:6379", options =>
+// Register Section 9: Real-Time Messaging services
+builder.Services.AddScoped<IPresenceTrackingService, Listo.Notification.Infrastructure.Services.PresenceTrackingService>();
+builder.Services.AddScoped<IReadReceiptService, Listo.Notification.Infrastructure.Services.ReadReceiptService>();
+builder.Services.AddScoped<ITypingIndicatorService, Listo.Notification.Infrastructure.Services.TypingIndicatorService>();
+
+// Configure SignalR
+// Environment-based configuration:
+// - Development: In-memory (for local testing)
+// - Production with Azure SignalR Service: AddAzureSignalR(connectionString)
+// - Production self-hosted: AddStackExchangeRedis(redisConnectionString)
+var signalRBuilder = builder.Services.AddSignalR(options =>
+{
+    options.EnableDetailedErrors = builder.Environment.IsDevelopment();
+    options.MaximumReceiveMessageSize = 102400; // 100KB max message size
+    options.StreamBufferCapacity = 10;
+    options.ClientTimeoutInterval = TimeSpan.FromMinutes(1);
+    options.KeepAliveInterval = TimeSpan.FromSeconds(15);
+    options.HandshakeTimeout = TimeSpan.FromSeconds(15);
+});
+
+// Add rate limiting filter for SignalR hubs
+builder.Services.AddSingleton<Listo.Notification.API.Filters.SignalRRateLimitFilter>();
+
+if (builder.Environment.IsProduction())
+{
+    // Production: Self-hosted with Redis backplane
+    // Note: To use Azure SignalR Service, install Microsoft.Azure.SignalR NuGet package
+    // and call signalRBuilder.AddAzureSignalR(connectionString)
+    var redisConnection = builder.Configuration.GetConnectionString("Redis") ?? "localhost:6379";
+    signalRBuilder.AddStackExchangeRedis(redisConnection, options =>
     {
-        options.Configuration.ChannelPrefix = "Listo.Notification";
+        options.Configuration.ChannelPrefix = StackExchange.Redis.RedisChannel.Literal("Listo.Notification.SignalR");
     });
+}
+else
+{
+    // Development: In-memory (no external dependencies)
+    // SignalR works with default configuration
+}
 
 // Configure Rate Limiting
 builder.Services.AddRateLimiter(options =>
