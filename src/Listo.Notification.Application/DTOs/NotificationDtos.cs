@@ -63,13 +63,47 @@ public record PagedNotificationsResponse
 }
 
 /// <summary>
+/// Request to update a notification (PATCH operation).
+/// </summary>
+public record UpdateNotificationRequest
+{
+    public string? Status { get; init; }
+    public string? CancellationReason { get; init; }
+}
+
+/// <summary>
+/// Request to schedule a notification for future delivery.
+/// </summary>
+public record ScheduleNotificationRequest : SendNotificationRequest
+{
+    public new DateTime ScheduledFor { get; init; }
+}
+
+/// <summary>
+/// Request to create user notification preferences.
+/// </summary>
+public record CreatePreferencesRequest
+{
+    public string UserId { get; init; } = string.Empty;
+    public string TenantId { get; init; } = string.Empty;
+    public string? Language { get; init; }
+    public string? Timezone { get; init; }
+    public Dictionary<NotificationChannel, bool>? ChannelPreferences { get; init; }
+    public TimeSpan? QuietHoursStart { get; init; }
+    public TimeSpan? QuietHoursEnd { get; init; }
+    public bool? EnableQuietHours { get; init; }
+}
+
+/// <summary>
 /// Request to update notification preferences.
 /// </summary>
 public record UpdatePreferencesRequest
 {
+    public string? Language { get; init; }
+    public string? Timezone { get; init; }
     public Dictionary<NotificationChannel, bool>? ChannelPreferences { get; init; }
-    public TimeOnly? QuietHoursStart { get; init; }
-    public TimeOnly? QuietHoursEnd { get; init; }
+    public TimeSpan? QuietHoursStart { get; init; }
+    public TimeSpan? QuietHoursEnd { get; init; }
     public bool? EnableQuietHours { get; init; }
 }
 

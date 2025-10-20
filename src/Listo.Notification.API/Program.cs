@@ -11,6 +11,10 @@ using Listo.Notification.Infrastructure.Providers;
 using Microsoft.Extensions.Options;
 using Listo.Notification.API.Hubs;
 using Listo.Notification.API.Middleware;
+using FluentValidation;
+using FluentValidation.AspNetCore;
+using Listo.Notification.Application.Validators;
+using Listo.Notification.Infrastructure.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -33,6 +37,11 @@ if (!builder.Environment.IsDevelopment())
 
 // Add services to the container
 builder.Services.AddControllers();
+
+// Add FluentValidation
+builder.Services.AddValidatorsFromAssemblyContaining<SendNotificationRequestValidator>();
+builder.Services.AddFluentValidationAutoValidation();
+
 builder.Services.AddEndpointsApiExplorer();
 
 // Configure Swagger/OpenAPI
@@ -150,9 +159,14 @@ builder.Services.AddScoped<INotificationRepository, Listo.Notification.Infrastru
 
 // Register application services
 builder.Services.AddScoped<INotificationService, Listo.Notification.Application.Services.NotificationService>();
+builder.Services.AddScoped<ITemplateRenderingService, Listo.Notification.Application.Services.TemplateRenderingService>();
+builder.Services.AddScoped<IRateLimiterService, Listo.Notification.Infrastructure.Services.RedisTokenBucketLimiter>();
 builder.Services.AddScoped<Listo.Notification.Application.Services.RateLimitingService>();
 builder.Services.AddScoped<Listo.Notification.Application.Services.BudgetEnforcementService>();
 builder.Services.AddSingleton<Listo.Notification.Infrastructure.Services.RedisTokenBucketLimiter>();
+
+// Register Azure Blob Storage for attachments
+builder.Services.AddScoped<IAttachmentStorageService, AttachmentStorageService>();
 
 // Register notification providers
 builder.Services.AddSingleton<ISmsProvider, TwilioSmsProvider>();

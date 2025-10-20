@@ -182,10 +182,47 @@
 - [x] ✅ BUILD VERIFIED — solution compiles after Section 9 integration
 
 ### Phase 4: Implementation Details
-- [ ] **Section 10-13: API, Validation, File Uploads, Testing**
-  - [ ] API implementation guidelines
-  - [ ] Validation with FluentValidation
-  - [ ] File upload to Azure Blob Storage
+
+#### ✅ Session 5 In Progress (2025-10-20)
+- [x] **Section 10-13: API, Validation, File Uploads** (Partial)
+  - [x] Created 8 FluentValidation validators:
+    - [x] SendNotificationRequestValidator (email/phone validation)
+    - [x] UpdateNotificationRequestValidator (cancellation status)
+    - [x] BatchSendRequestValidator (batch size limits, item validation)
+    - [x] BatchScheduleRequestValidator
+    - [x] CreateTemplateRequestValidator (template key format, content limits)
+    - [x] UpdateTemplateRequestValidator
+    - [x] CreatePreferencesRequestValidator (language/timezone/quiet hours)
+    - [x] UpdatePreferencesRequestValidator
+    - [x] ScheduleNotificationRequestValidator (future date validation)
+    - [x] InternalNotificationRequestValidator (service-to-service)
+    - [x] UploadAttachmentRequestValidator (file size/type validation)
+  - [x] Created AttachmentStorageService for Azure Blob Storage
+    - [x] Upload attachments with tenant partitioning
+    - [x] Download attachments with metadata
+    - [x] Delete attachments
+    - [x] Generate SAS URLs for secure file access
+    - [x] File organization: {tenantId}/{yyyy/MM/dd}/{guid}_{filename}
+  - [x] Added missing DTOs (UpdateNotificationRequest, ScheduleNotificationRequest, CreatePreferencesRequest, InternalNotificationRequest)
+  - [x] ✅ **BUILD VERIFIED** — Solution compiles successfully (with validators and storage service)
+  - [x] Created 7 API Controllers:
+    - [x] NotificationsController (send, list, get, cancel, schedule) — already existed, reviewed
+    - [x] BatchOperationsController (batch send, batch schedule, batch status)
+    - [x] TemplatesController (full CRUD + render endpoint)
+    - [x] PreferencesController (GET/PUT/PATCH user preferences)
+    - [x] InternalController (service-to-service queue, CloudEvents, health)
+    - [x] WebhooksController (Twilio, SendGrid, FCM) — created but commented out pending webhook handler implementation
+    - [x] AdminController (rate limits, budgets, failed notifications, statistics)
+  - [x] Register AttachmentStorageService in DI container
+  - [x] Register FluentValidation validators in DI container
+  - [x] Swagger/OpenAPI already configured in Program.cs
+  - [x] Fixed DTO issues (Added TenantId/Channel to UpdateRateLimitRequest, ScheduledFor to BatchScheduleRequest)
+  - [x] Fixed type mismatches in AdminController (string vs Guid)
+  - [x] Created SECTION_10_13_API_VALIDATION_UPLOADS_SUMMARY.md documentation
+  - [ ] Implement missing service interface methods for controller integration:
+    - [ ] INotificationService: SendBatchAsync, ScheduleBatchAsync, GetBatchStatusAsync, QueueNotificationAsync, ProcessCloudEventAsync, GetHealthAsync, GetPreferencesAsync, UpdatePreferencesAsync, PatchPreferencesAsync, GetBudgetsAsync, UpdateBudgetAsync, GetFailedNotificationsAsync, RetryNotificationAsync, GetStatisticsAsync
+    - [ ] ITemplateRenderingService: GetTemplatesAsync, GetTemplateByIdAsync, CreateTemplateAsync, UpdateTemplateAsync, DeleteTemplateAsync, RenderTemplateAsync
+    - [ ] IRateLimiterService: GetRateLimitConfigAsync, UpdateRateLimitConfigAsync
   - [ ] Testing strategy (unit, integration, contract, load, chaos)
 
 - [x] **Section 14: Azure Functions Configuration** ✅ FULLY COMPLETE
