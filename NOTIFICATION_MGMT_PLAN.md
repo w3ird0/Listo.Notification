@@ -3108,7 +3108,7 @@ Listo.Notification/
 
 ---
 
-### 7.2. Controller Design Patterns
+### 9.2. Controller Design Patterns
 
 #### Base Controller
 
@@ -3188,7 +3188,7 @@ public abstract class ApiControllerBase : ControllerBase
 
 ---
 
-### 7.3. NotificationsController Implementation
+### 9.3. NotificationsController Implementation
 
 ```csharp
 using Microsoft.AspNetCore.Authorization;
@@ -3326,7 +3326,7 @@ public class NotificationsController : ApiControllerBase
 
 ---
 
-### 7.4. Internal NotificationsController (Service-to-Service)
+### 9.4. Internal NotificationsController (Service-to-Service)
 
 ```csharp
 using Microsoft.AspNetCore.Mvc;
@@ -3416,7 +3416,7 @@ public class InternalNotificationsController : ApiControllerBase
 
 ---
 
-### 7.5. DevicesController Implementation
+### 9.5. DevicesController Implementation
 
 ```csharp
 using Microsoft.AspNetCore.Authorization;
@@ -3525,7 +3525,7 @@ public class DevicesController : ApiControllerBase
 
 ---
 
-### 7.6. ConversationsController Implementation
+### 9.6. ConversationsController Implementation
 
 ```csharp
 using Microsoft.AspNetCore.Authorization;
@@ -3688,7 +3688,7 @@ public class ConversationsController : ApiControllerBase
 
 ---
 
-### 7.7. PreferencesController Implementation
+### 9.7. PreferencesController Implementation
 
 ```csharp
 using Microsoft.AspNetCore.Authorization;
@@ -3757,7 +3757,7 @@ public class PreferencesController : ApiControllerBase
 
 ---
 
-### 7.8. AnalyticsController Implementation
+### 9.8. AnalyticsController Implementation
 
 ```csharp
 using Microsoft.AspNetCore.Authorization;
@@ -3818,7 +3818,7 @@ public class AnalyticsController : ApiControllerBase
 
 ---
 
-### 7.9. HealthController Implementation
+### 9.9. HealthController Implementation
 
 ```csharp
 using Microsoft.AspNetCore.Mvc;
@@ -3884,7 +3884,7 @@ public class HealthController : ControllerBase
 
 ---
 
-### 7.10. Application Layer Service Example
+### 9.10. Application Layer Service Example
 
 ```csharp
 using Listo.Notification.Application.Services.Interfaces;
@@ -4118,7 +4118,7 @@ public class NotificationService : INotificationService
 
 ---
 
-### 7.11. Middleware Implementation
+### 9.11. Middleware Implementation
 
 #### ExceptionHandlingMiddleware
 
@@ -4255,7 +4255,7 @@ public class ServiceAuthenticationMiddleware
 
 ---
 
-### 7.12. Program.cs Configuration
+### 9.12. Program.cs Configuration
 
 ```csharp
 using Listo.Notification.API.Extensions;
@@ -4343,7 +4343,7 @@ app.Run();
 
 ---
 
-### 7.13. API Response Models
+### 9.13. API Response Models
 
 ```csharp
 namespace Listo.Notification.API.Models.Responses;
@@ -4384,11 +4384,11 @@ public class PaginatedResponse<T>
 
 ---
 
-## 8. Validation & Error Handling
+## 10. Validation & Error Handling
 
 This section covers comprehensive input validation, error handling patterns, and consistent response formatting.
 
-### 8.1. FluentValidation Setup
+### 10.1. FluentValidation Setup
 
 **Installation:**
 ```bash
@@ -4413,7 +4413,7 @@ builder.Services.Configure<ApiBehaviorOptions>(options =>
 
 ---
 
-### 8.2. Request Validators
+### 10.2. Request Validators
 
 #### SendNotificationRequestValidator
 
@@ -4574,7 +4574,7 @@ public class QueueNotificationRequestValidator : AbstractValidator<QueueNotifica
 
 ---
 
-### 8.3. Validation Filter Attribute
+### 10.3. Validation Filter Attribute
 
 ```csharp
 using Microsoft.AspNetCore.Mvc;
@@ -4622,7 +4622,7 @@ public async Task<IActionResult> SendNotification([FromBody] SendNotificationReq
 
 ---
 
-### 8.4. Custom Exception Types
+### 10.4. Custom Exception Types
 
 ```csharp
 namespace Listo.Notification.Application.Exceptions;
@@ -4708,7 +4708,7 @@ public class ProviderException : NotificationException
 
 ---
 
-### 8.5. Enhanced Exception Handling Middleware
+### 10.5. Enhanced Exception Handling Middleware
 
 ```csharp
 using System.Net;
@@ -4857,7 +4857,7 @@ public class ExceptionHandlingMiddleware
 
 ---
 
-### 8.6. Result Pattern Implementation
+### 10.6. Result Pattern Implementation
 
 ```csharp
 namespace Listo.Notification.Application.Common;
@@ -4930,7 +4930,7 @@ public enum ErrorType
 
 ---
 
-### 8.7. Validation Summary
+### 10.7. Validation Summary
 
 **Validation Layers:**
 1. **Request DTOs:** DataAnnotations for basic validation
@@ -4973,11 +4973,11 @@ X-RateLimit-Reset: 1705392000
 
 ---
 
-## 9. Notification Sending Integrations
+## 11. Notification Sending Integrations
 
 This section details the implementation of notification providers for Push, SMS, and Email channels.
 
-### 9.1. Firebase Cloud Messaging (FCM) Integration
+### 11.1. Firebase Cloud Messaging (FCM) Integration
 
 **Installation:**
 ```bash
@@ -5156,7 +5156,7 @@ public class FcmPushProvider : IFcmPushProvider
 
 ---
 
-### 9.2. Twilio SMS Integration
+### 11.2. Twilio SMS Integration
 
 **Installation:**
 ```bash
@@ -5285,7 +5285,7 @@ public class TwilioSmsProvider : ITwilioSmsProvider
 
 ---
 
-### 9.3. SendGrid Email Integration
+### 11.3. SendGrid Email Integration
 
 **Installation:**
 ```bash
@@ -5424,7 +5424,7 @@ public class SendGridEmailProvider : IEmailProvider
 
 ---
 
-### 9.4. Provider Result Models
+### 11.4. Provider Result Models
 
 ```csharp
 namespace Listo.Notification.Infrastructure.Providers.Models;
@@ -5472,7 +5472,7 @@ public class BatchEmailSendResult
 
 ---
 
-### 9.5. Retry Logic with Polly
+### 11.5. Retry Logic with Polly
 
 **Installation:**
 ```bash
@@ -5518,11 +5518,11 @@ public static class PollyPolicies
 
 ---
 
-## 10. File & Image Upload Handling
+## 12. File & Image Upload Handling
 
 This section covers file upload to Azure Blob Storage for in-app messaging attachments.
 
-### 10.1. Azure Blob Storage Configuration
+### 12.1. Azure Blob Storage Configuration
 
 **Installation:**
 ```bash
@@ -5544,7 +5544,7 @@ dotnet add package Azure.Storage.Blobs
 
 ---
 
-### 10.2. Blob Storage Service Implementation
+### 12.2. Blob Storage Service Implementation
 
 ```csharp
 using Azure.Storage.Blobs;
@@ -5732,7 +5732,7 @@ public class FileUploadResult
 
 ---
 
-### 10.3. File Upload Security Middleware
+### 12.3. File Upload Security Middleware
 
 ```csharp
 using Microsoft.AspNetCore.Http.Features;
@@ -5786,11 +5786,11 @@ public class FileUploadSecurityMiddleware
 
 ---
 
-## 11. Testing Strategy
+## 13. Testing Strategy
 
 This section covers unit testing, integration testing, and test automation.
 
-### 11.1. Unit Testing Setup
+### 13.1. Unit Testing Setup
 
 **Installation:**
 ```bash
@@ -5801,7 +5801,7 @@ dotnet add package FluentAssertions
 dotnet add package Microsoft.EntityFrameworkCore.InMemory
 ```
 
-### 11.2. Unit Test Examples
+### 13.2. Unit Test Examples
 
 #### NotificationService Tests
 
@@ -5908,7 +5908,7 @@ public class NotificationServiceTests
 
 ---
 
-### 11.3. Integration Testing Setup
+### 13.3. Integration Testing Setup
 
 **Installation:**
 ```bash
@@ -6035,7 +6035,7 @@ public class NotificationsControllerTests : IntegrationTestBase
 
 ---
 
-### 11.4. Test Coverage Configuration
+### 13.4. Test Coverage Configuration
 
 **coverlet.runsettings:**
 ```xml
@@ -6065,11 +6065,11 @@ reportgenerator -reports:**/coverage.cobertura.xml -targetdir:coverage-report -r
 
 ---
 
-## 12. Containerization
+## 14. Containerization
 
 This section covers Docker containerization and deployment configuration.
 
-### 12.1. Dockerfile
+### 14.1. Dockerfile
 
 ```dockerfile
 # Build stage
@@ -6113,7 +6113,7 @@ ENTRYPOINT ["dotnet", "Listo.Notification.API.dll"]
 
 ---
 
-### 12.2. .dockerignore
+### 14.2. .dockerignore
 
 ```
 **/.dockerignore
@@ -6144,7 +6144,7 @@ README.md
 
 ---
 
-### 12.3. docker-compose.yml (for local development)
+### 14.3. docker-compose.yml (for local development)
 
 ```yaml
 version: '3.8'
@@ -6201,7 +6201,7 @@ networks:
 
 ---
 
-### 12.4. Environment Configuration
+### 14.4. Environment Configuration
 
 **.env.example:**
 ```bash
@@ -6243,11 +6243,11 @@ SERILOG__MINIMUMLEVEL=Information
 
 ---
 
-## 13. Azure Deployment
+## 15. Azure Deployment
 
 This section covers comprehensive Azure deployment configuration using Infrastructure as Code (IaC).
 
-### 13.1. Azure Resources Overview
+### 15.1. Azure Resources Overview
 
 **Required Resources:**
 - Azure Container Registry (ACR)
@@ -6263,7 +6263,7 @@ This section covers comprehensive Azure deployment configuration using Infrastru
 
 ---
 
-### 13.2. Bicep Infrastructure Configuration
+### 15.2. Bicep Infrastructure Configuration
 
 **main.bicep:**
 ```bicep
@@ -6436,7 +6436,7 @@ output sqlServerFqdn string = sqlDatabase.outputs.serverFqdn
 
 ---
 
-### 13.3. Container App Module (modules/container-app.bicep)
+### 15.3. Container App Module (modules/container-app.bicep)
 
 ```bicep
 param location string
@@ -6556,7 +6556,7 @@ output id string = containerApp.id
 
 ---
 
-### 13.4. Deployment Script
+### 15.4. Deployment Script
 
 **deploy.sh:**
 ```bash
@@ -6621,7 +6621,7 @@ echo "Deployment complete!"
 
 ---
 
-### 13.5. Health Check Configuration
+### 15.5. Health Check Configuration
 
 **Health Check Endpoint Implementation:**
 ```csharp
@@ -6756,14 +6756,14 @@ app.MapHealthChecks("/health/ready", new HealthCheckOptions
 
 ---
 
-## 14. Documentation
+## 16. Documentation
 
 - **Swagger/OpenAPI:** Use Swashbuckle to generate and expose API docs.
 - **README:** Document setup, environment variables, and deployment steps.
 
 ---
 
-## 15. CI/CD Pipeline
+## 17. CI/CD Pipeline
 
 - **Build & Test:** Use GitHub Actions or Azure DevOps for build, test, and lint.
 - **Container Build:** Build and push Docker image on merge to main.
@@ -6771,7 +6771,7 @@ app.MapHealthChecks("/health/ready", new HealthCheckOptions
 
 ---
 
-## 16. Security
+## 18. Security
 
 - **Secrets:** Store sensitive data in Azure Key Vault.
 - **HTTPS:** Enforce HTTPS in production.
@@ -6781,7 +6781,7 @@ app.MapHealthChecks("/health/ready", new HealthCheckOptions
 
 ---
 
-## 17. Maintenance & Future Enhancements
+## 19. Maintenance & Future Enhancements
 
 - **Versioning:** Plan for future API versions.
 - **Performance:** Monitor and optimize queries and indexes.
