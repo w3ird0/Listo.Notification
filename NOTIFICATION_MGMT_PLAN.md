@@ -8739,5 +8739,2592 @@ az consumption budget create-notification \
 
 ---
 
+---
+
+## 20. CI/CD Pipeline
+
+> **Note:** This section complements Section 17 (Azure Deployment) and provides a detailed conceptual outline of the CI/CD pipeline. Implementation is deferred per Phase 5 scope. The preferred tool is **GitHub Actions**.
+
+---
+
+### 20.1. Pipeline Overview
+
+The CI/CD pipeline for Listo.Notification follows a **multi-stage approach** with environment-specific deployments:
+
+**Environments:**
+- **Development (dev):** Automatic deployment on merge to `develop` branch
+- **Staging (staging):** Automatic deployment on merge to `main` branch
+- **Production (prod):** Manual approval required after staging validation
+
+**Pipeline Stages:**
+
+```yaml
+Stages:
+  1. Build
+  2. Test
+  3. Security Scan
+  4. Package
+  5. Deploy (Dev)
+  6. Deploy (Staging)
+  7. Deploy (Production) [Manual Approval]
+```
+
+---
+
+### 20.2. Build Stage
+
+**Objectives:**
+- Restore NuGet dependencies
+- Build .NET 9 solution
+- Validate code formatting
+- Generate build artifacts
+
+**Example GitHub Actions workflow:**
+
+```yaml
+name: Build and Test
+
+on:
+  push:
+    branches: [ develop, main ]
+  pull_request:
+    branches: [ develop, main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup .NET 9
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+      
+      - name: Restore dependencies
+        run: dotnet restore
+      
+      - name: Check code formatting
+        run: dotnet format --verify-no-changes --verbosity diagnostic
+      
+      - name: Build
+        run: dotnet build --no-restore --configuration Release
+      
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-artifacts
+          path: '**/bin/Release/**'
+```
+
+---
+
+### 20.3. Test Stage
+
+**Objectives:**
+- Run unit tests
+- Run integration tests (with Testcontainers)
+- Generate code coverage reports
+- Enforce minimum coverage thresholds
+
+> **Note:** Detailed testing strategy is outlined in Section 13. Implementation is pending.
+
+**Example test execution:**
+
+```yaml
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup .NET 9
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+      
+      - name: Run unit tests
+        run: |
+          dotnet test tests/Listo.Notification.Domain.Tests \
+            --configuration Release \
+            --no-build \
+            --logger trx \
+            --collect:"XPlat Code Coverage"
+      
+      - name: Run integration tests
+        run: |
+          dotnet test tests/Listo.Notification.Integration.Tests \
+            --configuration Release \
+            --no-build \
+            --logger trx \
+            --collect:"XPlat Code Coverage"
+      
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: '**/coverage.cobertura.xml'
+          fail_ci_if_error: true
+```
+
+**Coverage Requirements:**
+- **Minimum coverage:** 80% overall
+- **Critical paths:** 95% coverage (authentication, payment, PII handling)
+
+---
+
+### 20.4. Security Scan Stage
+
+**Objectives:**
+- Software Composition Analysis (SCA) for vulnerable dependencies
+- Secret scanning to prevent credential leaks
+- Static Application Security Testing (SAST)
+
+**Tools:**
+
+1. **Dependency Scanning:**
+   - GitHub Dependabot (automatic PR creation)
+   - `dotnet list package --vulnerable`
+
+2. **Secret Scanning:**
+   - GitHub Secret Scanning (automatic)
+   - TruffleHog or GitGuardian (optional)
+
+3. **SAST:**
+   - SonarCloud or CodeQL
+
+**Example workflow:**
+
+```yaml
+  security:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Run vulnerability scan
+        run: |
+          dotnet list package --vulnerable --include-transitive 2>&1 | tee scan.txt
+          if grep -q "has the following vulnerable packages" scan.txt; then
+            echo "Vulnerable packages found!"
+            exit 1
+          fi
+      
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: csharp
+      
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+      
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+```
+
+---
+
+### 20.5. Package Stage
+
+**Objectives:**
+- Publish .NET 9 application
+- Create Docker image
+- Push image to Azure Container Registry (ACR)
+- Generate release artifacts
+
+**Example workflow:**
+
+```yaml
+  package:
+    needs: [test, security]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup .NET 9
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+      
+      - name: Publish application
+        run: |
+          dotnet publish src/Listo.Notification.Api/Listo.Notification.Api.csproj \
+            --configuration Release \
+            --output ./publish \
+            --no-restore
+      
+      - name: Build Docker image
+        run: |
+          docker build -t listonotification:${{ github.sha }} .
+      
+      - name: Login to Azure Container Registry
+        uses: azure/docker-login@v1
+        with:
+          login-server: ${{ secrets.ACR_LOGIN_SERVER }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+      
+      - name: Push to ACR
+        run: |
+          docker tag listonotification:${{ github.sha }} \
+            ${{ secrets.ACR_LOGIN_SERVER }}/listonotification:${{ github.sha }}
+          docker push ${{ secrets.ACR_LOGIN_SERVER }}/listonotification:${{ github.sha }}
+          docker tag listonotification:${{ github.sha }} \
+            ${{ secrets.ACR_LOGIN_SERVER }}/listonotification:latest
+          docker push ${{ secrets.ACR_LOGIN_SERVER }}/listonotification:latest
+```
+
+---
+
+### 20.6. Deploy Stage
+
+**Objectives:**
+- Deploy to Azure App Service using slot swaps
+- Run smoke tests
+- Require manual approval for production
+
+**Deployment Strategy:**
+- **Blue-Green Deployment:** Use App Service deployment slots
+- **Canary Deployment:** Route 10% traffic to new slot, monitor, then swap
+
+**Example deployment workflow:**
+
+```yaml
+  deploy-dev:
+    needs: package
+    runs-on: ubuntu-latest
+    environment: development
+    steps:
+      - name: Login to Azure
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS_DEV }}
+      
+      - name: Deploy to App Service (Dev)
+        uses: azure/webapps-deploy@v2
+        with:
+          app-name: app-listo-notification-dev
+          images: ${{ secrets.ACR_LOGIN_SERVER }}/listonotification:${{ github.sha }}
+      
+      - name: Run smoke tests
+        run: |
+          curl -f https://app-listo-notification-dev.azurewebsites.net/health || exit 1
+
+  deploy-staging:
+    needs: deploy-dev
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: Login to Azure
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS_STAGING }}
+      
+      - name: Deploy to staging slot
+        uses: azure/webapps-deploy@v2
+        with:
+          app-name: app-listo-notification-prod
+          slot-name: staging
+          images: ${{ secrets.ACR_LOGIN_SERVER }}/listonotification:${{ github.sha }}
+      
+      - name: Run smoke tests on staging
+        run: |
+          curl -f https://app-listo-notification-prod-staging.azurewebsites.net/health || exit 1
+
+  deploy-production:
+    needs: deploy-staging
+    runs-on: ubuntu-latest
+    environment: 
+      name: production
+      url: https://api.listo.com/notifications
+    steps:
+      - name: Login to Azure
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS_PROD }}
+      
+      - name: Swap staging to production
+        run: |
+          az webapp deployment slot swap \
+            --resource-group rg-listo-notification-prod \
+            --name app-listo-notification-prod \
+            --slot staging \
+            --target-slot production
+      
+      - name: Verify production health
+        run: |
+          sleep 30
+          curl -f https://api.listo.com/notifications/health || exit 1
+```
+
+**Manual Approval:**
+- GitHub Environments with required reviewers
+- Approval required before production deployment
+- Notifications sent to on-call engineer
+
+---
+
+### 20.7. Rollback Strategy
+
+In case of deployment failure or production issues:
+
+**Immediate Rollback (< 5 minutes):**
+
+```bash
+# Swap back to previous slot
+az webapp deployment slot swap \
+  --resource-group rg-listo-notification-prod \
+  --name app-listo-notification-prod \
+  --slot production \
+  --target-slot staging
+```
+
+**Version Rollback (re-deploy previous image):**
+
+```bash
+# Deploy previous known-good image
+az webapp config container set \
+  --resource-group rg-listo-notification-prod \
+  --name app-listo-notification-prod \
+  --docker-custom-image-name $ACR_LOGIN_SERVER/listonotification:previous-sha
+```
+
+---
+
+### 20.8. Pipeline Monitoring
+
+**Key Metrics:**
+- Build success rate
+- Average build duration
+- Test pass rate
+- Deployment frequency
+- Mean time to recovery (MTTR)
+- Change failure rate
+
+**Alerts:**
+- Failed builds trigger Slack/Teams notification
+- Failed deployments page on-call engineer
+- Security scan failures block pipeline progression
+
+---
+
+## 21. Security (Runtime Security, Monitoring, and Incident Response)
+
+> **Note:** This section complements Section 18 (Security Design) and focuses on **runtime security operations**, monitoring, threat detection, and incident response.
+
+---
+
+### 21.1. Runtime Security Monitoring
+
+**Azure Defender Integration:**
+
+Enable Microsoft Defender for Cloud across all resources:
+
+```bash
+# Enable Defender for App Service
+az security pricing create \
+  --name AppServices \
+  --tier Standard
+
+# Enable Defender for SQL
+az security pricing create \
+  --name SqlServers \
+  --tier Standard
+
+# Enable Defender for Storage
+az security pricing create \
+  --name StorageAccounts \
+  --tier Standard
+
+# Enable Defender for Key Vault
+az security pricing create \
+  --name KeyVaults \
+  --tier Standard
+```
+
+**Application Insights Security Monitoring:**
+
+1. **PII Masking with Custom Telemetry Processor:**
+
+```csharp
+public class PiiMaskingTelemetryProcessor : ITelemetryProcessor
+{
+    private readonly ITelemetryProcessor _next;
+    private readonly Regex _emailRegex = new Regex(@"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b");
+    private readonly Regex _phoneRegex = new Regex(@"\b\d{3}[-.]?\d{3}[-.]?\d{4}\b");
+    private readonly Regex _tokenRegex = new Regex(@"\b[A-Za-z0-9_-]{20,}\b");
+
+    public PiiMaskingTelemetryProcessor(ITelemetryProcessor next)
+    {
+        _next = next;
+    }
+
+    public void Process(ITelemetry item)
+    {
+        // Mask PII in trace messages
+        if (item is TraceTelemetry trace)
+        {
+            trace.Message = MaskPii(trace.Message);
+        }
+
+        // Mask PII in exception messages
+        if (item is ExceptionTelemetry exception)
+        {
+            exception.Message = MaskPii(exception.Message);
+            if (exception.Exception != null)
+            {
+                // Consider masking stack trace carefully to preserve debugging info
+            }
+        }
+
+        // Mask PII in custom properties
+        if (item is ISupportProperties propItem)
+        {
+            foreach (var key in propItem.Properties.Keys.ToList())
+            {
+                propItem.Properties[key] = MaskPii(propItem.Properties[key]);
+            }
+        }
+
+        _next.Process(item);
+    }
+
+    private string MaskPii(string input)
+    {
+        if (string.IsNullOrEmpty(input)) return input;
+
+        input = _emailRegex.Replace(input, "***EMAIL***");
+        input = _phoneRegex.Replace(input, "***PHONE***");
+        input = _tokenRegex.Replace(input, "***TOKEN***");
+
+        return input;
+    }
+}
+
+// Register in Program.cs
+builder.Services.AddApplicationInsightsTelemetry(options =>
+{
+    options.ConnectionString = builder.Configuration["ApplicationInsights:ConnectionString"];
+});
+
+builder.Services.AddApplicationInsightsTelemetryProcessor<PiiMaskingTelemetryProcessor>();
+```
+
+2. **Anomaly Detection Alerts:**
+
+Configure alerts in Application Insights:
+
+```bash
+# Alert on 5xx spike
+az monitor metrics alert create \
+  --name alert-5xx-spike \
+  --resource-group rg-listo-notification-prod \
+  --scopes /subscriptions/{sub}/resourceGroups/rg-listo-notification-prod/providers/Microsoft.Web/sites/app-listo-notification-prod \
+  --condition "count requests/server where resultCode >= 500 > 50" \
+  --window-size 5m \
+  --evaluation-frequency 1m
+
+# Alert on 401/403 spike (potential brute-force)
+az monitor metrics alert create \
+  --name alert-auth-failures \
+  --resource-group rg-listo-notification-prod \
+  --scopes /subscriptions/{sub}/resourceGroups/rg-listo-notification-prod/providers/Microsoft.Web/sites/app-listo-notification-prod \
+  --condition "count requests/server where resultCode in (401, 403) > 100" \
+  --window-size 5m \
+  --evaluation-frequency 1m
+
+# Alert on 429 rate-limit spike
+az monitor metrics alert create \
+  --name alert-rate-limit-spike \
+  --resource-group rg-listo-notification-prod \
+  --scopes /subscriptions/{sub}/resourceGroups/rg-listo-notification-prod/providers/Microsoft.Web/sites/app-listo-notification-prod \
+  --condition "count requests/server where resultCode == 429 > 500" \
+  --window-size 5m \
+  --evaluation-frequency 1m
+```
+
+**Microsoft Sentinel Integration (Optional):**
+
+For advanced threat detection:
+
+1. **Ingest logs from:**
+   - App Service (application logs, HTTP logs)
+   - Azure SQL (audit logs, threat detection)
+   - Azure AD (sign-in logs, audit logs)
+   - Key Vault (access logs)
+
+2. **Analytics rules:**
+   - Brute-force detection (multiple 401s from same IP)
+   - Token abuse (same token used from multiple IPs)
+   - Unusual IP addresses (geo-location anomalies)
+   - Privilege escalation attempts
+   - Mass data export attempts
+
+---
+
+### 21.2. DDoS Protection and WAF
+
+**Azure Front Door with WAF:**
+
+```bash
+# Create WAF policy
+az network front-door waf-policy create \
+  --name waf-listo-notification \
+  --resource-group rg-listo-notification-prod \
+  --mode Prevention
+
+# Enable managed rules
+az network front-door waf-policy managed-rules add \
+  --policy-name waf-listo-notification \
+  --resource-group rg-listo-notification-prod \
+  --type Microsoft_DefaultRuleSet \
+  --version 2.1
+
+# Add custom rule for rate limiting at edge
+az network front-door waf-policy rule create \
+  --policy-name waf-listo-notification \
+  --resource-group rg-listo-notification-prod \
+  --name RateLimitPerIP \
+  --rule-type RateLimitRule \
+  --rate-limit-threshold 1000 \
+  --rate-limit-duration 1 \
+  --match-variable RemoteAddr \
+  --action Block
+```
+
+**Geo-Filtering for Admin Endpoints:**
+
+```bash
+# Block admin endpoints for non-allowed countries
+az network front-door waf-policy rule create \
+  --policy-name waf-listo-notification \
+  --resource-group rg-listo-notification-prod \
+  --name BlockAdminNonUS \
+  --rule-type MatchRule \
+  --match-variable RequestUri \
+  --operator Contains \
+  --match-value "/api/v1/admin" \
+  --transforms Lowercase \
+  --action Block \
+  --match-condition "RemoteAddr GeoMatch Not US,CA,GB"
+```
+
+**IP Allowlisting for Provider Webhooks:**
+
+```bash
+# Restrict Twilio webhook endpoint to Twilio IPs
+az webapp config access-restriction add \
+  --resource-group rg-listo-notification-prod \
+  --name app-listo-notification-prod \
+  --rule-name AllowTwilioWebhooks \
+  --action Allow \
+  --ip-address 54.252.254.64/26 \
+  --priority 100 \
+  --scm-site false
+
+# Add additional Twilio IP ranges
+# See: https://www.twilio.com/docs/usage/webhooks/ip-addresses
+```
+
+---
+
+### 21.3. Runtime Hardening and Secrets Rotation Alarms
+
+**Key Vault Secret Expiry Alerts:**
+
+```bash
+# Alert 30 days before expiry
+az monitor metrics alert create \
+  --name alert-kv-secret-expiry-30d \
+  --resource-group rg-listo-notification-prod \
+  --scopes /subscriptions/{sub}/resourceGroups/rg-listo-notification-prod/providers/Microsoft.KeyVault/vaults/kv-listo-notification \
+  --condition "avg DaysToSecretExpiry < 30" \
+  --window-size 1d \
+  --evaluation-frequency 1d
+
+# Alert 7 days before expiry
+az monitor metrics alert create \
+  --name alert-kv-secret-expiry-7d \
+  --resource-group rg-listo-notification-prod \
+  --scopes /subscriptions/{sub}/resourceGroups/rg-listo-notification-prod/providers/Microsoft.KeyVault/vaults/kv-listo-notification \
+  --condition "avg DaysToSecretExpiry < 7" \
+  --window-size 1d \
+  --evaluation-frequency 6h
+
+# Alert on failed decrypt operations (key mismatch)
+az monitor metrics alert create \
+  --name alert-kv-failed-decrypts \
+  --resource-group rg-listo-notification-prod \
+  --scopes /subscriptions/{sub}/resourceGroups/rg-listo-notification-prod/providers/Microsoft.KeyVault/vaults/kv-listo-notification \
+  --condition "count ServiceApiResult where ActivityName == 'Decrypt' and ResultType == 'Failed' > 10" \
+  --window-size 5m \
+  --evaluation-frequency 1m
+```
+
+**Lock Down Debug and Swagger in Production:**
+
+```csharp
+// Program.cs
+if (!app.Environment.IsProduction())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI();
+    app.UseDeveloperExceptionPage();
+}
+else
+{
+    // Optional: Allow Swagger in production behind authentication
+    var swaggerEnabled = builder.Configuration.GetValue<bool>("Swagger:EnableInProduction");
+    if (swaggerEnabled)
+    {
+        app.UseSwagger();
+        app.UseSwaggerUI(options =>
+        {
+            options.SwaggerEndpoint("/swagger/v1/swagger.json", "Listo.Notification API v1");
+            options.RoutePrefix = "swagger";
+        });
+        
+        // Require authentication for Swagger UI
+        app.MapGet("/swagger/{**path}", async context =>
+        {
+            if (!context.User.Identity?.IsAuthenticated ?? true)
+            {
+                context.Response.StatusCode = 401;
+                await context.Response.WriteAsync("Unauthorized");
+                return;
+            }
+            await context.Response.WriteAsync("Redirect to Swagger UI");
+        });
+    }
+    
+    app.UseExceptionHandler("/error");
+    app.UseHsts();
+}
+```
+
+---
+
+### 21.4. Incident Response Runbooks
+
+**Credential Leak:**
+
+1. **Immediate Actions (< 15 minutes):**
+   ```bash
+   # Revoke provider API keys
+   # Twilio: https://console.twilio.com/
+   # SendGrid: https://app.sendgrid.com/settings/api_keys
+   # FCM: https://console.firebase.google.com/
+   
+   # Rotate Key Vault secrets
+   az keyvault secret set \
+     --vault-name kv-listo-notification \
+     --name TwilioApiKey \
+     --value "new-secure-key"
+   
+   # Invalidate all API keys (if leaked)
+   # Execute emergency disable via admin endpoint or direct DB update
+   ```
+
+2. **Investigation (< 1 hour):**
+   - Review audit logs to identify scope of exposure
+   - Check Application Insights for unauthorized API calls
+   - Review Azure AD sign-in logs for suspicious activity
+
+3. **Communication (< 2 hours):**
+   - Notify security team and stakeholders
+   - Prepare incident report
+   - Update status page if user-facing impact
+
+4. **Remediation (< 24 hours):**
+   - Complete key rotation across all environments
+   - Review and enhance secret scanning in CI/CD
+   - Update access policies and audit retention
+   - Conduct post-mortem
+
+**Suspicious Token Usage:**
+
+1. **Detection Indicators:**
+   - Same JWT used from multiple IPs in different geo-locations
+   - High-frequency API calls beyond normal user patterns
+   - Access to unusual endpoints or data scopes
+
+2. **Response Actions:**
+   ```bash
+   # Revoke specific client application (if token source identified)
+   # Update Azure AD app registration to revoke tokens
+   
+   # Block tenant temporarily (admin API)
+   curl -X POST https://api.listo.com/notifications/api/v1/admin/tenants/{tenantId}/block \
+     -H "Authorization: Bearer $ADMIN_TOKEN" \
+     -H "X-Reason: Suspicious activity detected"
+   
+   # Force re-authentication for affected users
+   az ad user revoke-sign-in-sessions --id user@example.com
+   ```
+
+3. **Audit Actions:**
+   - Export all API calls from suspicious token via Application Insights
+   - Review data access and potential PII exposure
+   - Notify affected tenants if data breach confirmed
+
+**Webhook Abuse:**
+
+1. **Detection Indicators:**
+   - High volume of webhook calls from unexpected IPs
+   - Invalid signatures or malformed payloads
+   - Attempts to inject malicious content
+
+2. **Response Actions:**
+   ```bash
+   # Rotate webhook shared secrets
+   az keyvault secret set \
+     --vault-name kv-listo-notification \
+     --name TwilioWebhookSecret \
+     --value "new-secret"
+   
+   # Update Twilio/SendGrid webhook configuration with new secret
+   # Add IP restrictions if possible
+   
+   az webapp config access-restriction add \
+     --resource-group rg-listo-notification-prod \
+     --name app-listo-notification-prod \
+     --rule-name BlockSuspiciousIP \
+     --action Deny \
+     --ip-address 1.2.3.4/32 \
+     --priority 50
+   
+   # Temporarily disable webhook endpoint (feature flag)
+   az webapp config appsettings set \
+     --resource-group rg-listo-notification-prod \
+     --name app-listo-notification-prod \
+     --settings WebhooksEnabled=false
+   ```
+
+**Outbound Provider Outage:**
+
+1. **Detection:**
+   - High failure rate for specific channel (SMS, Email, Push)
+   - Increased response times from provider APIs
+   - Circuit breaker trips
+
+2. **Response Actions:**
+   ```csharp
+   // Activate failover provider (already implemented in SendingService)
+   // Manual override via admin endpoint if automated failover insufficient
+   
+   // Temporarily disable affected channel or route traffic
+   curl -X POST https://api.listo.com/notifications/api/v1/admin/providers/twilio/disable \
+     -H "Authorization: Bearer $ADMIN_TOKEN"
+   
+   // Increase retry backoff and reduce concurrent sends
+   curl -X PATCH https://api.listo.com/notifications/api/v1/admin/config/retry-policy \
+     -H "Authorization: Bearer $ADMIN_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{ "baseDelaySeconds": 10, "backoffFactor": 3, "maxAttempts": 3 }'
+   ```
+
+3. **Communication:**
+   - Raise Customer Advisory on status page
+   - Update estimated resolution time
+   - Notify high-priority customers directly
+
+---
+
+### 21.5. Tenant-Level Kill Switch
+
+**Purpose:** Ability to immediately disable all notification sending for a specific tenant and/or channel in case of abuse, budget overrun, or security incident.
+
+**Implementation:**
+
+```csharp
+// Domain entity
+public class TenantConfiguration
+{
+    public string TenantId { get; set; }
+    public bool IsEnabled { get; set; }
+    public Dictionary<string, bool> ChannelEnabled { get; set; } // channel => enabled
+    public string DisabledReason { get; set; }
+    public DateTime? DisabledAt { get; set; }
+    public string DisabledBy { get; set; }
+}
+
+// Admin endpoint
+[HttpPost("api/v1/admin/tenants/{tenantId}/disable")]
+[Authorize(Policy = "notifications:admin")]
+public async Task<IActionResult> DisableTenant(
+    string tenantId,
+    [FromBody] DisableTenantRequest request)
+{
+    var config = await _configService.GetTenantConfigAsync(tenantId);
+    
+    config.IsEnabled = false;
+    config.DisabledReason = request.Reason;
+    config.DisabledAt = DateTime.UtcNow;
+    config.DisabledBy = User.Identity.Name;
+    
+    await _configService.UpdateTenantConfigAsync(config);
+    
+    // Invalidate cache
+    await _cacheService.RemoveAsync($"tenant-config:{tenantId}");
+    
+    // Audit log
+    _logger.LogWarning(
+        "Tenant {TenantId} disabled by {Admin}. Reason: {Reason}",
+        tenantId, User.Identity.Name, request.Reason);
+    
+    return Ok(new { message = "Tenant disabled successfully" });
+}
+
+// Rate limiter integration
+public async Task<bool> IsAllowedAsync(string tenantId, string channel)
+{
+    // Check kill switch first (cached)
+    var config = await _cacheService.GetOrSetAsync(
+        $"tenant-config:{tenantId}",
+        async () => await _configService.GetTenantConfigAsync(tenantId),
+        TimeSpan.FromMinutes(5));
+    
+    if (!config.IsEnabled) return false;
+    if (!config.ChannelEnabled.GetValueOrDefault(channel, true)) return false;
+    
+    // Continue with normal rate limiting
+    return await _rateLimiter.AllowAsync(tenantId, channel);
+}
+```
+
+**Audit Trail:**
+
+All kill switch actions logged to immutable audit table:
+
+```sql
+CREATE TABLE AuditLog (
+    Id BIGINT IDENTITY(1,1) PRIMARY KEY,
+    Timestamp DATETIME2 NOT NULL DEFAULT GETUTCDATE(),
+    TenantId NVARCHAR(100) NOT NULL,
+    Action NVARCHAR(50) NOT NULL, -- 'TenantDisabled', 'TenantEnabled', 'ChannelDisabled'
+    PerformedBy NVARCHAR(200) NOT NULL,
+    Reason NVARCHAR(500) NULL,
+    Details NVARCHAR(MAX) NULL, -- JSON payload
+    IpAddress NVARCHAR(50) NULL,
+    UserAgent NVARCHAR(500) NULL,
+    INDEX IX_AuditLog_TenantId_Timestamp (TenantId, Timestamp DESC)
+);
+```
+
+---
+
+### 21.6. Forensics and Evidence Preservation
+
+**Security Audit Log Retention:**
+
+- **Default retention:** 365 days (configurable per compliance requirements)
+- **Storage:** Azure SQL with automated backups + immutable blob storage for critical events
+
+**Immutable Storage Setup:**
+
+```bash
+# Create storage account with immutability support
+az storage account create \
+  --name stlistoauditprod \
+  --resource-group rg-listo-notification-prod \
+  --location eastus \
+  --sku Standard_LRS \
+  --kind StorageV2
+
+# Create container with immutability policy
+az storage container create \
+  --name security-audit-logs \
+  --account-name stlistoauditprod \
+  --public-access off
+
+az storage container immutability-policy create \
+  --account-name stlistoauditprod \
+  --container-name security-audit-logs \
+  --period 365 \
+  --allow-protected-append-writes false
+```
+
+**Critical Events for Immutable Storage:**
+
+1. Admin actions (tenant disable, quota changes, key rotation)
+2. Authentication failures (401/403) with details
+3. PII access events
+4. Configuration changes to security settings
+5. Provider credential usage
+
+**Export to Immutable Storage:**
+
+```csharp
+public class AuditLogExporter : BackgroundService
+{
+    private readonly IAuditLogRepository _auditRepo;
+    private readonly BlobServiceClient _blobClient;
+    
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            // Export critical audit logs hourly
+            var logs = await _auditRepo.GetCriticalLogsAsync(DateTime.UtcNow.AddHours(-1));
+            
+            if (logs.Any())
+            {
+                var containerClient = _blobClient.GetBlobContainerClient("security-audit-logs");
+                var blobName = $"audit-{DateTime.UtcNow:yyyyMMdd-HH}.jsonl";
+                var blobClient = containerClient.GetAppendBlobClient(blobName);
+                
+                // Create if not exists (immutable policy prevents deletion)
+                await blobClient.CreateIfNotExistsAsync();
+                
+                // Append logs (JSON Lines format)
+                using var stream = new MemoryStream();
+                using var writer = new StreamWriter(stream);
+                foreach (var log in logs)
+                {
+                    await writer.WriteLineAsync(JsonSerializer.Serialize(log));
+                }
+                await writer.FlushAsync();
+                stream.Position = 0;
+                
+                await blobClient.AppendBlockAsync(stream);
+            }
+            
+            await Task.Delay(TimeSpan.FromHours(1), stoppingToken);
+        }
+    }
+}
+```
+
+---
+
+## 22. GDPR & Compliance
+
+This section details data protection requirements, user rights, and compliance procedures for GDPR and other privacy regulations.
+
+---
+
+### 22.1. Data Retention Policies
+
+**Default Retention Periods (Configurable per Tenant):**
+
+| Data Type | Default Retention | Purge Mechanism |
+|-----------|-------------------|------------------|
+| Notifications (content) | 90 days | Azure Function (daily) |
+| Delivery receipts & provider events | 180 days | Azure Function (daily) |
+| Support chat transcripts | 180 days | Azure Function (daily) |
+| Customer-Driver chat | 30 days | Azure Function (daily) |
+| Audit logs (security) | 365 days | Manual (legal holds) |
+| Audit logs (operational) | 90 days | Azure Function (weekly) |
+| Queue processing records | 30 days after completion | Azure Function (daily) |
+| PII (email, phone, device tokens) | Tied to user account lifecycle | On user deletion request |
+
+**Configuration Model:**
+
+```csharp
+public class TenantRetentionPolicy
+{
+    public string TenantId { get; set; }
+    public int NotificationRetentionDays { get; set; } = 90;
+    public int DeliveryReceiptRetentionDays { get; set; } = 180;
+    public int SupportChatRetentionDays { get; set; } = 180;
+    public int CustomerDriverChatRetentionDays { get; set; } = 30;
+    public int OperationalAuditLogRetentionDays { get; set; } = 90;
+    public bool LegalHoldActive { get; set; } = false;
+    public string LegalHoldReason { get; set; }
+    public DateTime? LegalHoldStartDate { get; set; }
+}
+```
+
+**Purge Job Implementation:**
+
+```csharp
+// Azure Function - Timer Trigger (daily at 2 AM UTC)
+[Function("DataRetentionPurgeJob")]
+public async Task Run(
+    [TimerTrigger("0 0 2 * * *")] TimerInfo timer,
+    FunctionContext context)
+{
+    var logger = context.GetLogger<DataRetentionPurgeJob>();
+    logger.LogInformation("Starting data retention purge job at {Time}", DateTime.UtcNow);
+    
+    var tenants = await _tenantService.GetAllTenantsAsync();
+    
+    foreach (var tenant in tenants)
+    {
+        var policy = await _retentionService.GetPolicyAsync(tenant.TenantId);
+        
+        // Skip if legal hold active
+        if (policy.LegalHoldActive)
+        {
+            logger.LogWarning("Skipping purge for tenant {TenantId} due to legal hold", tenant.TenantId);
+            continue;
+        }
+        
+        // Purge notifications
+        var notificationCutoff = DateTime.UtcNow.AddDays(-policy.NotificationRetentionDays);
+        var purgedNotifications = await _notificationRepo.PurgeOlderThanAsync(
+            tenant.TenantId, notificationCutoff);
+        
+        // Purge delivery receipts
+        var receiptCutoff = DateTime.UtcNow.AddDays(-policy.DeliveryReceiptRetentionDays);
+        var purgedReceipts = await _receiptRepo.PurgeOlderThanAsync(
+            tenant.TenantId, receiptCutoff);
+        
+        // Purge chat messages
+        var supportChatCutoff = DateTime.UtcNow.AddDays(-policy.SupportChatRetentionDays);
+        var purgedSupportChats = await _chatRepo.PurgeSupportChatsOlderThanAsync(
+            tenant.TenantId, supportChatCutoff);
+        
+        var customerDriverChatCutoff = DateTime.UtcNow.AddDays(-policy.CustomerDriverChatRetentionDays);
+        var purgedCustomerDriverChats = await _chatRepo.PurgeCustomerDriverChatsOlderThanAsync(
+            tenant.TenantId, customerDriverChatCutoff);
+        
+        logger.LogInformation(
+            "Purge complete for tenant {TenantId}. Notifications: {NotifCount}, Receipts: {ReceiptCount}, Support: {SupportCount}, CD: {CDCount}",
+            tenant.TenantId, purgedNotifications, purgedReceipts, purgedSupportChats, purgedCustomerDriverChats);
+    }
+}
+```
+
+---
+
+### 22.2. Right to be Forgotten (Erasure)
+
+**Process Overview:**
+
+1. **Input:** User ID and/or PII (email, phone, device token)
+2. **Locate Data:** Search across all tables using tenant context and hashed PII indices
+3. **Erasure:** Hard-delete or anonymize (retain non-PII analytics where legally permitted)
+4. **Tombstone:** Create deletion record to prevent re-creation from caches
+5. **Audit:** Log all erasure actions for compliance
+
+**API Endpoint:**
+
+```csharp
+[HttpPost("api/v1/admin/users/{userId}/erase")]
+[Authorize(Policy = "notifications:admin")]
+public async Task<IActionResult> EraseUserData(
+    string userId,
+    [FromQuery] string tenantId,
+    [FromBody] ErasureRequest request)
+{
+    // Validate request
+    if (string.IsNullOrEmpty(tenantId) || string.IsNullOrEmpty(userId))
+        return BadRequest("TenantId and UserId are required");
+    
+    // Check for legal holds
+    var policy = await _retentionService.GetPolicyAsync(tenantId);
+    if (policy.LegalHoldActive && !request.OverrideLegalHold)
+    {
+        return Conflict(new { error = "Legal hold active. Erasure blocked." });
+    }
+    
+    // Execute erasure
+    var result = await _erasureService.EraseUserDataAsync(new ErasureContext
+    {
+        TenantId = tenantId,
+        UserId = userId,
+        Email = request.Email,
+        PhoneNumber = request.PhoneNumber,
+        DeviceTokens = request.DeviceTokens,
+        RequestedBy = User.Identity.Name,
+        Reason = request.Reason
+    });
+    
+    // Audit log
+    await _auditService.LogAsync(new AuditEvent
+    {
+        TenantId = tenantId,
+        Action = "UserDataErased",
+        PerformedBy = User.Identity.Name,
+        Details = JsonSerializer.Serialize(new
+        {
+            userId,
+            recordsErased = result.RecordsErased,
+            tablesAffected = result.TablesAffected
+        })
+    });
+    
+    return Ok(new
+    {
+        message = "User data erased successfully",
+        recordsErased = result.RecordsErased,
+        tablesAffected = result.TablesAffected
+    });
+}
+```
+
+**Erasure Service Implementation:**
+
+```csharp
+public class UserDataErasureService
+{
+    private readonly INotificationRepository _notificationRepo;
+    private readonly IDeviceRepository _deviceRepo;
+    private readonly IPreferencesRepository _preferencesRepo;
+    private readonly IChatRepository _chatRepo;
+    private readonly ITombstoneRepository _tombstoneRepo;
+    private readonly ICacheService _cacheService;
+    
+    public async Task<ErasureResult> EraseUserDataAsync(ErasureContext context)
+    {
+        var result = new ErasureResult();
+        
+        // 1. Locate by UserId
+        var notificationIds = await _notificationRepo.FindByUserIdAsync(
+            context.TenantId, context.UserId);
+        result.RecordsErased += await _notificationRepo.HardDeleteAsync(notificationIds);
+        result.TablesAffected.Add("Notifications");
+        
+        // 2. Locate by encrypted PII (using hashed indices)
+        if (!string.IsNullOrEmpty(context.Email))
+        {
+            var emailHash = ComputeHash(context.Email, context.TenantId);
+            var emailNotifications = await _notificationRepo.FindByEmailHashAsync(
+                context.TenantId, emailHash);
+            result.RecordsErased += await _notificationRepo.HardDeleteAsync(emailNotifications);
+        }
+        
+        if (!string.IsNullOrEmpty(context.PhoneNumber))
+        {
+            var phoneHash = ComputeHash(context.PhoneNumber, context.TenantId);
+            var phoneNotifications = await _notificationRepo.FindByPhoneHashAsync(
+                context.TenantId, phoneHash);
+            result.RecordsErased += await _notificationRepo.HardDeleteAsync(phoneNotifications);
+        }
+        
+        // 3. Erase device tokens
+        if (context.DeviceTokens?.Any() ?? false)
+        {
+            foreach (var token in context.DeviceTokens)
+            {
+                var tokenHash = ComputeHash(token, context.TenantId);
+                var devices = await _deviceRepo.FindByTokenHashAsync(
+                    context.TenantId, tokenHash);
+                result.RecordsErased += await _deviceRepo.HardDeleteAsync(devices);
+            }
+            result.TablesAffected.Add("Devices");
+        }
+        
+        // 4. Erase preferences
+        result.RecordsErased += await _preferencesRepo.DeleteByUserIdAsync(
+            context.TenantId, context.UserId);
+        result.TablesAffected.Add("NotificationPreferences");
+        
+        // 5. Erase or anonymize chat messages
+        // Option A: Hard delete (GDPR requirement)
+        result.RecordsErased += await _chatRepo.DeleteByUserIdAsync(
+            context.TenantId, context.UserId);
+        
+        // Option B: Anonymize (retain analytics)
+        // await _chatRepo.AnonymizeByUserIdAsync(context.TenantId, context.UserId);
+        result.TablesAffected.Add("ChatMessages");
+        
+        // 6. Create tombstone to prevent cache resurrection
+        await _tombstoneRepo.CreateAsync(new Tombstone
+        {
+            TenantId = context.TenantId,
+            UserId = context.UserId,
+            ErasedAt = DateTime.UtcNow,
+            ErasedBy = context.RequestedBy,
+            Reason = context.Reason
+        });
+        
+        // 7. Invalidate caches
+        await _cacheService.RemoveAsync($"user:{context.TenantId}:{context.UserId}:*");
+        
+        return result;
+    }
+    
+    private string ComputeHash(string value, string tenantSalt)
+    {
+        using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(tenantSalt));
+        var hashBytes = hmac.ComputeHash(Encoding.UTF8.GetBytes(value));
+        return Convert.ToBase64String(hashBytes);
+    }
+}
+```
+
+**Tombstone Table:**
+
+```sql
+CREATE TABLE Tombstones (
+    Id BIGINT IDENTITY(1,1) PRIMARY KEY,
+    TenantId NVARCHAR(100) NOT NULL,
+    UserId NVARCHAR(100) NOT NULL,
+    ErasedAt DATETIME2 NOT NULL DEFAULT GETUTCDATE(),
+    ErasedBy NVARCHAR(200) NOT NULL,
+    Reason NVARCHAR(500) NULL,
+    INDEX IX_Tombstones_TenantId_UserId (TenantId, UserId)
+);
+```
+
+---
+
+### 22.3. User Data Export (Subject Access Request)
+
+**Endpoint:**
+
+```csharp
+[HttpGet("api/v1/users/{userId}/notifications/export")]
+[Authorize(Policy = "notifications:read")]
+public async Task<IActionResult> ExportUserData(
+    string userId,
+    [FromQuery] string tenantId,
+    [FromQuery] ExportFormat format = ExportFormat.Json)
+{
+    // Validate tenant access
+    if (!User.HasClaim("tenantId", tenantId) && !User.IsInRole("Admin"))
+        return Forbid();
+    
+    // Check export size
+    var recordCount = await _notificationRepo.CountByUserIdAsync(tenantId, userId);
+    
+    if (recordCount > 10000)
+    {
+        // Asynchronous export for large datasets
+        var exportJobId = await _exportService.QueueExportJobAsync(new ExportRequest
+        {
+            TenantId = tenantId,
+            UserId = userId,
+            Format = format,
+            RequestedBy = User.Identity.Name
+        });
+        
+        return Accepted(new
+        {
+            message = "Export job queued. Download link will be sent via email.",
+            jobId = exportJobId,
+            estimatedCompletionMinutes = Math.Ceiling(recordCount / 1000.0)
+        });
+    }
+    
+    // Synchronous export for small datasets
+    var data = await _exportService.ExportUserDataAsync(tenantId, userId);
+    
+    return format switch
+    {
+        ExportFormat.Json => Ok(data),
+        ExportFormat.JsonLines => File(
+            Encoding.UTF8.GetBytes(string.Join("\n", data.Select(JsonSerializer.Serialize))),
+            "application/x-ndjson",
+            $"user-{userId}-export.jsonl"),
+        _ => BadRequest("Unsupported format")
+    };
+}
+```
+
+**Asynchronous Export Job:**
+
+```csharp
+// Azure Function - Queue Trigger
+[Function("DataExportProcessor")]
+public async Task Run(
+    [QueueTrigger("data-export-queue")] ExportRequest request,
+    FunctionContext context)
+{
+    var logger = context.GetLogger<DataExportProcessor>();
+    logger.LogInformation("Processing export for user {UserId} in tenant {TenantId}",
+        request.UserId, request.TenantId);
+    
+    // Export data
+    var data = await _exportService.ExportUserDataAsync(request.TenantId, request.UserId);
+    
+    // Upload to blob storage with SAS token
+    var blobClient = _blobServiceClient
+        .GetBlobContainerClient("data-exports")
+        .GetBlobClient($"{request.TenantId}/{request.UserId}/{Guid.NewGuid()}.json");
+    
+    await blobClient.UploadAsync(
+        new BinaryData(JsonSerializer.Serialize(data)),
+        overwrite: false);
+    
+    // Generate SAS URL (expires in 24 hours)
+    var sasUrl = blobClient.GenerateSasUri(
+        BlobSasPermissions.Read,
+        DateTimeOffset.UtcNow.AddHours(24));
+    
+    // Send email with download link
+    await _emailService.SendAsync(new EmailMessage
+    {
+        To = request.RequestedBy, // or user email from profile
+        Subject = "Your data export is ready",
+        TemplateKey = "data-export-ready",
+        Data = new
+        {
+            downloadUrl = sasUrl.ToString(),
+            expiresAt = DateTimeOffset.UtcNow.AddHours(24).ToString("yyyy-MM-dd HH:mm UTC")
+        }
+    });
+    
+    logger.LogInformation("Export complete for user {UserId}", request.UserId);
+}
+```
+
+**Export Data Structure:**
+
+```json
+{
+  "userId": "user-123",
+  "tenantId": "acme-co",
+  "exportedAt": "2025-10-20T18:00:00Z",
+  "notifications": [
+    {
+      "id": "ntf_abc123",
+      "channel": "email",
+      "templateKey": "order-confirmation",
+      "status": "delivered",
+      "sentAt": "2025-10-15T12:00:00Z",
+      "deliveredAt": "2025-10-15T12:00:05Z",
+      "content": {
+        "subject": "Your order #12345 has been confirmed",
+        "body": "Thank you for your order..."
+      }
+    }
+  ],
+  "preferences": {
+    "email": true,
+    "sms": false,
+    "push": true,
+    "inApp": true
+  },
+  "devices": [
+    {
+      "platform": "ios",
+      "registeredAt": "2025-01-10T10:00:00Z",
+      "lastUsedAt": "2025-10-19T15:30:00Z"
+    }
+  ]
+}
+```
+
+---
+
+### 22.4. Consent Management
+
+**Preference Model:**
+
+```csharp
+public class NotificationPreferences
+{
+    public string TenantId { get; set; }
+    public string UserId { get; set; }
+    
+    // Per-channel opt-in/out
+    public bool EmailEnabled { get; set; } = true;
+    public bool SmsEnabled { get; set; } = true;
+    public bool PushEnabled { get; set; } = true;
+    public bool InAppEnabled { get; set; } = true;
+    
+    // Granular topic preferences
+    public Dictionary<string, bool> TopicPreferences { get; set; } = new();
+    // Example: { "marketing": false, "transactional": true, "security": true }
+    
+    // Consent evidence
+    public DateTime ConsentGivenAt { get; set; }
+    public string ConsentSource { get; set; } // "signup", "settings", "api"
+    public string ConsentIpAddress { get; set; }
+    public string ConsentUserAgent { get; set; }
+    
+    public DateTime? LastModifiedAt { get; set; }
+}
+```
+
+**Consent Validation Before Send:**
+
+```csharp
+public async Task<bool> CanSendNotificationAsync(
+    string tenantId,
+    string userId,
+    string channel,
+    string topic)
+{
+    var prefs = await _preferencesRepo.GetAsync(tenantId, userId);
+    
+    // Check channel preference
+    var channelEnabled = channel switch
+    {
+        "email" => prefs.EmailEnabled,
+        "sms" => prefs.SmsEnabled,
+        "push" => prefs.PushEnabled,
+        "inApp" => prefs.InAppEnabled,
+        _ => false
+    };
+    
+    if (!channelEnabled) return false;
+    
+    // Check topic preference (if specified)
+    if (!string.IsNullOrEmpty(topic))
+    {
+        if (!prefs.TopicPreferences.TryGetValue(topic, out var topicEnabled))
+            topicEnabled = true; // Default to enabled for new topics
+        
+        if (!topicEnabled) return false;
+    }
+    
+    // Override: Always allow critical/regulatory notifications
+    var criticalTopics = new[] { "security", "legal", "account" };
+    if (criticalTopics.Contains(topic, StringComparer.OrdinalIgnoreCase))
+        return true;
+    
+    return true;
+}
+```
+
+**Consent Capture:**
+
+```csharp
+[HttpPost("api/v1/notification-preferences")]
+[Authorize(Policy = "notifications:read")]
+public async Task<IActionResult> UpdatePreferences(
+    [FromBody] UpdatePreferencesRequest request)
+{
+    var userId = User.FindFirst("sub")?.Value;
+    var tenantId = User.FindFirst("tenantId")?.Value;
+    
+    var prefs = await _preferencesRepo.GetOrCreateAsync(tenantId, userId);
+    
+    // Update preferences
+    prefs.EmailEnabled = request.EmailEnabled;
+    prefs.SmsEnabled = request.SmsEnabled;
+    prefs.PushEnabled = request.PushEnabled;
+    prefs.InAppEnabled = request.InAppEnabled;
+    prefs.TopicPreferences = request.TopicPreferences ?? prefs.TopicPreferences;
+    
+    // Capture consent evidence
+    if (prefs.ConsentGivenAt == default)
+    {
+        prefs.ConsentGivenAt = DateTime.UtcNow;
+        prefs.ConsentSource = "settings";
+        prefs.ConsentIpAddress = HttpContext.Connection.RemoteIpAddress?.ToString();
+        prefs.ConsentUserAgent = HttpContext.Request.Headers["User-Agent"].ToString();
+    }
+    
+    prefs.LastModifiedAt = DateTime.UtcNow;
+    
+    await _preferencesRepo.UpdateAsync(prefs);
+    
+    // Audit log
+    _logger.LogInformation(
+        "User {UserId} updated notification preferences. Email: {Email}, SMS: {Sms}, Push: {Push}",
+        userId, prefs.EmailEnabled, prefs.SmsEnabled, prefs.PushEnabled);
+    
+    return Ok(prefs);
+}
+```
+
+---
+
+### 22.5. Audit Logging for Compliance
+
+**Audit Events:**
+
+- Template create/update/delete
+- Preference changes (opt-in/out)
+- Quota and budget modifications
+- Admin actions (tenant disable, key rotation)
+- Data export and erasure requests
+
+**Immutable Audit Table:**
+
+```sql
+CREATE TABLE ComplianceAuditLog (
+    Id BIGINT IDENTITY(1,1) PRIMARY KEY,
+    Timestamp DATETIME2 NOT NULL DEFAULT GETUTCDATE(),
+    TenantId NVARCHAR(100) NOT NULL,
+    UserId NVARCHAR(100) NULL,
+    Action NVARCHAR(100) NOT NULL,
+    EntityType NVARCHAR(50) NULL, -- 'Template', 'Preferences', 'User'
+    EntityId NVARCHAR(200) NULL,
+    PerformedBy NVARCHAR(200) NOT NULL,
+    IpAddress NVARCHAR(50) NULL,
+    UserAgent NVARCHAR(500) NULL,
+    ChangesBefore NVARCHAR(MAX) NULL, -- JSON
+    ChangesAfter NVARCHAR(MAX) NULL, -- JSON
+    Reason NVARCHAR(500) NULL,
+    INDEX IX_ComplianceAuditLog_TenantId_Timestamp (TenantId, Timestamp DESC),
+    INDEX IX_ComplianceAuditLog_UserId (UserId),
+    INDEX IX_ComplianceAuditLog_Action (Action)
+);
+
+-- Prevent modifications (enforce append-only)
+CREATE TRIGGER TR_ComplianceAuditLog_PreventUpdate
+ON ComplianceAuditLog
+INSTEAD OF UPDATE, DELETE
+AS
+BEGIN
+    RAISERROR('ComplianceAuditLog is immutable. Updates and deletes are not allowed.', 16, 1);
+    ROLLBACK TRANSACTION;
+END;
+GO
+```
+
+**Export for Compliance:**
+
+```bash
+# Export audit logs for specific tenant and time range
+az sql db export \
+  --resource-group rg-listo-notification-prod \
+  --server sql-listo-notification-prod \
+  --name listonotification \
+  --admin-user sqladmin \
+  --admin-password $SQL_PASSWORD \
+  --storage-key-type SharedAccessKey \
+  --storage-key $STORAGE_KEY \
+  --storage-uri "https://stlistoauditprod.blob.core.windows.net/audit-exports/tenant-acme-2025-Q4.bacpac"
+```
+
+---
+
+### 22.6. Provider DPAs and Data Processing
+
+**Data Processing Agreements (DPAs):**
+
+- **Twilio:** [https://www.twilio.com/legal/data-protection-addendum](https://www.twilio.com/legal/data-protection-addendum)
+- **SendGrid:** [https://www.twilio.com/legal/data-protection-addendum](https://www.twilio.com/legal/data-protection-addendum) (owned by Twilio)
+- **Firebase/Google:** [https://firebase.google.com/support/privacy](https://firebase.google.com/support/privacy)
+
+**Processing Roles:**
+
+- **Listo.Notification:** Data Controller (for tenant data)
+- **Twilio/SendGrid/Firebase:** Data Processors (sub-processors)
+
+**Minimal PII Sharing:**
+
+- **SMS (Twilio):** Only phone number and message content
+- **Email (SendGrid):** Only email address, subject, body, attachments
+- **Push (FCM):** Only device token and message payload
+- **No unnecessary PII:** Names, addresses, IDs are not shared unless required for delivery
+
+**Transfer Safeguards:**
+
+- **Standard Contractual Clauses (SCCs):** In place for EU/UK data transfers
+- **Supplementary Measures:** Encryption in transit (TLS 1.2+), encryption at rest for PII
+
+---
+
+### 22.7. Cross-Border Data Transfer
+
+**Regional Endpoint Alignment:**
+
+- Prefer provider regional endpoints aligned with tenant residency
+- Example: Twilio EU region for EU tenants
+
+**Configuration:**
+
+```json
+{
+  "Providers": {
+    "Twilio": {
+      "Regions": {
+        "EU": {
+          "AccountSid": "{{KeyVault:TwilioAccountSidEU}}",
+          "AuthToken": "{{KeyVault:TwilioAuthTokenEU}}",
+          "ApiBaseUrl": "https://api.twilio.com" // Twilio routes internally
+        },
+        "US": {
+          "AccountSid": "{{KeyVault:TwilioAccountSidUS}}",
+          "AuthToken": "{{KeyVault:TwilioAuthTokenUS}}",
+          "ApiBaseUrl": "https://api.twilio.com"
+        }
+      }
+    }
+  }
+}
+```
+
+**Avoid Storing Provider Payloads:**
+
+- Do not persist webhook payloads beyond retention window
+- Minimize logging of provider responses
+- Mask PII in Application Insights (Section 21.1)
+
+---
+
+### 22.8. Privacy by Design and Data Minimization
+
+**Principles:**
+
+1. **Collect Minimum PII:** Only collect email, phone, device token as needed for delivery
+2. **Pseudonymization:** Use hashed indices for lookups; store encrypted values
+3. **Tokenization Preference:** Where possible, use tokens instead of raw PII
+4. **Log Masking:** Never log raw PII in Application Insights or console logs (Section 21.1)
+5. **Short-Lived Sessions:** JWT tokens with short expiration (15 minutes access, 7 days refresh)
+6. **Secure Deletion:** Hard-delete PII on user request; no soft deletes
+
+**PII Minimization Example:**
+
+```csharp
+// Bad: Logging raw PII
+_logger.LogInformation("Sending email to {Email}", user.Email);
+
+// Good: Logging masked or hashed PII
+_logger.LogInformation("Sending email to user {UserId} (hash: {EmailHash})",
+    user.Id, ComputeHash(user.Email));
+```
+
+---
+
+## 23. Clean Architecture Implementation
+
+This section describes the folder structure, dependency rules, and architectural patterns used in Listo.Notification, following Clean Architecture principles **without MediatR**.
+
+---
+
+### 23.1. Folder Structure
+
+**Solution Structure:**
+
+```
+Listo.Notification/
+├── src/
+│   ├── Domain/
+│   │   ├── Entities/
+│   │   │   ├── Notification.cs
+│   │   │   ├── Device.cs
+│   │   │   ├── Template.cs
+│   │   │   ├── NotificationPreferences.cs
+│   │   │   ├── TenantConfiguration.cs
+│   │   │   └── ...
+│   │   ├── ValueObjects/
+│   │   │   ├── EmailAddress.cs
+│   │   │   ├── PhoneNumber.cs
+│   │   │   ├── DeviceToken.cs
+│   │   │   └── ...
+│   │   ├── DomainServices/
+│   │   │   ├── TemplateRenderer.cs
+│   │   │   ├── CostCalculator.cs
+│   │   │   └── ...
+│   │   ├── DomainEvents/
+│   │   │   ├── NotificationSent.cs
+│   │   │   ├── NotificationFailed.cs
+│   │   │   └── ...
+│   │   └── Listo.Notification.Domain.csproj
+│   │
+│   ├── Application/
+│   │   ├── Services/
+│   │   │   ├── NotificationService.cs
+│   │   │   ├── SendingService.cs
+│   │   │   ├── TemplateService.cs
+│   │   │   ├── PreferencesService.cs
+│   │   │   └── ...
+│   │   ├── DTOs/
+│   │   │   ├── SendNotificationRequest.cs
+│   │   │   ├── NotificationResponse.cs
+│   │   │   ├── TemplateDto.cs
+│   │   │   └── ...
+│   │   ├── Validators/
+│   │   │   ├── SendNotificationRequestValidator.cs
+│   │   │   └── ...
+│   │   ├── Interfaces/ (Ports)
+│   │   │   ├── INotificationRepository.cs
+│   │   │   ├── IEmailSender.cs
+│   │   │   ├── ISmsSender.cs
+│   │   │   ├── IPushSender.cs
+│   │   │   ├── ICacheService.cs
+│   │   │   ├── IRateLimiter.cs
+│   │   │   ├── IFieldEncryptionService.cs
+│   │   │   ├── IDomainEventDispatcher.cs
+│   │   │   └── ...
+│   │   └── Listo.Notification.Application.csproj
+│   │
+│   ├── Infrastructure/
+│   │   ├── Data/
+│   │   │   ├── NotificationDbContext.cs
+│   │   │   ├── Repositories/
+│   │   │   │   ├── NotificationRepository.cs
+│   │   │   │   ├── DeviceRepository.cs
+│   │   │   │   ├── TemplateRepository.cs
+│   │   │   │   └── ...
+│   │   │   ├── Configurations/
+│   │   │   │   ├── NotificationConfiguration.cs
+│   │   │   │   └── ...
+│   │   │   └── Migrations/
+│   │   ├── Providers/
+│   │   │   ├── Twilio/
+│   │   │   │   ├── TwilioSmsClient.cs
+│   │   │   │   └── TwilioWebhookHandler.cs
+│   │   │   ├── SendGrid/
+│   │   │   │   ├── SendGridEmailClient.cs
+│   │   │   │   └── SendGridWebhookHandler.cs
+│   │   │   ├── FCM/
+│   │   │   │   ├── FcmPushClient.cs
+│   │   │   │   └── FcmWebhookHandler.cs
+│   │   │   └── ...
+│   │   ├── Caching/
+│   │   │   ├── RedisCacheService.cs
+│   │   │   └── RateLimiter.cs
+│   │   ├── Messaging/
+│   │   │   ├── ServiceBusPublisher.cs
+│   │   │   ├── ServiceBusSubscriber.cs
+│   │   │   └── DomainEventDispatcher.cs
+│   │   ├── Security/
+│   │   │   ├── FieldEncryptionService.cs
+│   │   │   └── KeyVaultSecretProvider.cs
+│   │   └── Listo.Notification.Infrastructure.csproj
+│   │
+│   ├── Api/
+│   │   ├── Controllers/
+│   │   │   ├── NotificationsController.cs
+│   │   │   ├── TemplatesController.cs
+│   │   │   ├── PreferencesController.cs
+│   │   │   ├── AdminController.cs
+│   │   │   └── WebhooksController.cs
+│   │   ├── Middleware/
+│   │   │   ├── ExceptionHandlingMiddleware.cs
+│   │   │   ├── SecurityHeadersMiddleware.cs
+│   │   │   └── IdempotencyMiddleware.cs
+│   │   ├── Hubs/
+│   │   │   └── NotificationHub.cs (SignalR)
+│   │   ├── Program.cs
+│   │   ├── appsettings.json
+│   │   ├── appsettings.Development.json
+│   │   └── Listo.Notification.Api.csproj
+│   │
+│   └── Functions/
+│       ├── BackgroundJobs/
+│       │   ├── ScheduledNotificationRunner.cs
+│       │   ├── RetryProcessor.cs
+│       │   ├── DataRetentionPurgeJob.cs
+│       │   ├── BudgetCalculator.cs
+│       │   └── KeyRotationJob.cs
+│       ├── EventHandlers/
+│       │   ├── OrderCreatedHandler.cs
+│       │   ├── RideCompletedHandler.cs
+│       │   └── ...
+│       └── Listo.Notification.Functions.csproj
+│
+├── tests/
+│   ├── Listo.Notification.Domain.Tests/
+│   ├── Listo.Notification.Application.Tests/
+│   ├── Listo.Notification.Infrastructure.Tests/
+│   ├── Listo.Notification.Api.Tests/
+│   └── Listo.Notification.Integration.Tests/
+│
+├── docs/
+│   ├── DEPLOYMENT_GUIDE.md
+│   ├── AUTHENTICATION_CONFIGURATION.md
+│   ├── COST_MANAGEMENT_RATE_LIMITING.md
+│   └── SERVICE_EVENT_MAPPINGS.md
+│
+├── Listo.Notification.sln
+├── README.md
+├── TODO.md
+└── NOTIFICATION_MGMT_PLAN.md
+```
+
+---
+
+### 23.2. Dependency Rules and Inversion of Control
+
+**Dependency Flow:**
+
+```
+Api/Functions → Application → Domain
+       ↓
+ Infrastructure (implements Application interfaces)
+```
+
+**Rules:**
+
+1. **Domain** has NO dependencies (pure business logic)
+2. **Application** depends ONLY on Domain
+3. **Infrastructure** depends on Application (implements interfaces)
+4. **Api/Functions** depend on Application and Infrastructure (for DI registration)
+
+**Inversion of Control:**
+
+```csharp
+// Application/Interfaces/IEmailSender.cs (Port)
+public interface IEmailSender
+{
+    Task<SendResult> SendAsync(EmailMessage message, CancellationToken ct = default);
+}
+
+// Infrastructure/Providers/SendGrid/SendGridEmailClient.cs (Adapter)
+public class SendGridEmailClient : IEmailSender
+{
+    private readonly SendGridClient _client;
+    
+    public async Task<SendResult> SendAsync(EmailMessage message, CancellationToken ct)
+    {
+        // SendGrid-specific implementation
+    }
+}
+
+// Api/Program.cs (DI Registration)
+builder.Services.AddScoped<IEmailSender, SendGridEmailClient>();
+```
+
+**No MediatR:**
+
+Services orchestrate directly for simplicity and performance:
+
+```csharp
+// Application/Services/NotificationService.cs
+public class NotificationService
+{
+    private readonly ISendingService _sendingService;
+    private readonly INotificationRepository _repo;
+    private readonly IDomainEventDispatcher _eventDispatcher;
+    
+    public async Task<NotificationResponse> SendAsync(SendNotificationRequest request)
+    {
+        // Validate
+        // Create entity
+        var notification = Notification.Create(request);
+        
+        // Persist
+        await _repo.AddAsync(notification);
+        
+        // Send
+        var result = await _sendingService.SendAsync(notification);
+        
+        // Dispatch domain event
+        await _eventDispatcher.DispatchAsync(new NotificationSent(notification.Id));
+        
+        return NotificationResponse.FromEntity(notification);
+    }
+}
+```
+
+---
+
+### 23.3. Mapping Strategy
+
+**DTOs ↔ Entities:**
+
+Prefer explicit mapping for clarity and performance:
+
+```csharp
+// Manual mapping
+public class NotificationResponse
+{
+    public string Id { get; set; }
+    public string Status { get; set; }
+    public DateTime SentAt { get; set; }
+    
+    public static NotificationResponse FromEntity(Notification entity)
+    {
+        return new NotificationResponse
+        {
+            Id = entity.Id,
+            Status = entity.Status.ToString(),
+            SentAt = entity.SentAt
+        };
+    }
+}
+```
+
+**Alternative (Optional):**
+
+Use Mapster for complex mappings:
+
+```csharp
+// Configure mappings
+public class MappingProfile : IRegister
+{
+    public void Register(TypeAdapterConfig config)
+    {
+        config.NewConfig<Notification, NotificationResponse>()
+            .Map(dest => dest.Status, src => src.Status.ToString());
+    }
+}
+
+// Usage
+var response = notification.Adapt<NotificationResponse>();
+```
+
+---
+
+### 23.4. Interface Segregation
+
+**Narrow Interfaces:**
+
+```csharp
+// Good: Specific interfaces per provider type
+public interface IEmailSender
+{
+    Task<SendResult> SendAsync(EmailMessage message, CancellationToken ct = default);
+}
+
+public interface ISmsSender
+{
+    Task<SendResult> SendAsync(SmsMessage message, CancellationToken ct = default);
+}
+
+public interface IPushSender
+{
+    Task<SendResult> SendAsync(PushMessage message, CancellationToken ct = default);
+}
+
+// Bad: One large interface
+public interface INotificationSender // DON'T DO THIS
+{
+    Task<SendResult> SendEmailAsync(...);
+    Task<SendResult> SendSmsAsync(...);
+    Task<SendResult> SendPushAsync(...);
+}
+```
+
+**Read vs Write Separation:**
+
+```csharp
+// Separate read and write operations where beneficial
+public interface INotificationReadRepository
+{
+    Task<Notification> GetByIdAsync(string id);
+    Task<IEnumerable<Notification>> FindAsync(Expression<Func<Notification, bool>> predicate);
+}
+
+public interface INotificationWriteRepository
+{
+    Task AddAsync(Notification notification);
+    Task UpdateAsync(Notification notification);
+    Task DeleteAsync(string id);
+}
+```
+
+---
+
+### 23.5. Repository Pattern Usage
+
+**Approach:**
+
+- **If using EF Core extensively:** Consider lean repositories or direct DbContext via interface (IAppDbContext) to avoid anemic abstraction
+- **For high-throughput read models:** Use Dapper or compiled queries
+
+**Example with IAppDbContext:**
+
+```csharp
+// Application/Interfaces/IAppDbContext.cs
+public interface IAppDbContext
+{
+    DbSet<Notification> Notifications { get; }
+    DbSet<Device> Devices { get; }
+    DbSet<Template> Templates { get; }
+    
+    Task<int> SaveChangesAsync(CancellationToken ct = default);
+}
+
+// Infrastructure/Data/NotificationDbContext.cs
+public class NotificationDbContext : DbContext, IAppDbContext
+{
+    public DbSet<Notification> Notifications { get; set; }
+    public DbSet<Device> Devices { get; set; }
+    public DbSet<Template> Templates { get; set; }
+}
+
+// Application service uses interface directly
+public class NotificationService
+{
+    private readonly IAppDbContext _dbContext;
+    
+    public async Task<Notification> GetAsync(string id)
+    {
+        return await _dbContext.Notifications
+            .Where(n => n.Id == id)
+            .FirstOrDefaultAsync();
+    }
+}
+```
+
+**High-Throughput Reads with Dapper:**
+
+```csharp
+public class NotificationQueryRepository
+{
+    private readonly IDbConnection _connection;
+    
+    public async Task<IEnumerable<NotificationSummary>> GetRecentAsync(
+        string tenantId, int pageSize = 50)
+    {
+        const string sql = @"
+            SELECT TOP (@PageSize)
+                Id, Channel, Status, SentAt
+            FROM Notifications
+            WHERE TenantId = @TenantId
+            ORDER BY CreatedAt DESC";
+        
+        return await _connection.QueryAsync<NotificationSummary>(
+            sql, new { TenantId = tenantId, PageSize = pageSize });
+    }
+}
+```
+
+---
+
+### 23.6. Domain Events Without MediatR
+
+**Lightweight Event Dispatcher:**
+
+```csharp
+// Application/Interfaces/IDomainEventDispatcher.cs
+public interface IDomainEventDispatcher
+{
+    Task DispatchAsync<TEvent>(TEvent domainEvent, CancellationToken ct = default)
+        where TEvent : IDomainEvent;
+}
+
+// Domain/DomainEvents/IDomainEvent.cs
+public interface IDomainEvent
+{
+    string EventId { get; }
+    DateTime OccurredAt { get; }
+}
+
+// Domain/DomainEvents/NotificationSent.cs
+public record NotificationSent(
+    string NotificationId,
+    string TenantId,
+    string Channel) : IDomainEvent
+{
+    public string EventId { get; } = Guid.NewGuid().ToString();
+    public DateTime OccurredAt { get; } = DateTime.UtcNow;
+}
+```
+
+**Implementation Options:**
+
+**Option 1: In-Memory Channel (simple, fast):**
+
+```csharp
+// Infrastructure/Messaging/InMemoryEventDispatcher.cs
+public class InMemoryEventDispatcher : IDomainEventDispatcher
+{
+    private readonly Channel<IDomainEvent> _channel;
+    
+    public InMemoryEventDispatcher()
+    {
+        _channel = Channel.CreateUnbounded<IDomainEvent>();
+        
+        // Background processor
+        Task.Run(ProcessEventsAsync);
+    }
+    
+    public async Task DispatchAsync<TEvent>(TEvent domainEvent, CancellationToken ct)
+        where TEvent : IDomainEvent
+    {
+        await _channel.Writer.WriteAsync(domainEvent, ct);
+    }
+    
+    private async Task ProcessEventsAsync()
+    {
+        await foreach (var evt in _channel.Reader.ReadAllAsync())
+        {
+            // Route to handlers
+            // Example: Log, update analytics, etc.
+            Console.WriteLine($"Event: {evt.GetType().Name}");
+        }
+    }
+}
+```
+
+**Option 2: Azure Service Bus (cross-service, reliable):**
+
+```csharp
+// Infrastructure/Messaging/ServiceBusEventDispatcher.cs
+public class ServiceBusEventDispatcher : IDomainEventDispatcher
+{
+    private readonly ServiceBusClient _client;
+    private readonly ServiceBusSender _sender;
+    
+    public ServiceBusEventDispatcher(ServiceBusClient client)
+    {
+        _client = client;
+        _sender = _client.CreateSender("listo-notifications-events");
+    }
+    
+    public async Task DispatchAsync<TEvent>(TEvent domainEvent, CancellationToken ct)
+        where TEvent : IDomainEvent
+    {
+        // Convert to CloudEvents format
+        var cloudEvent = new CloudEvent(
+            source: "listo.notification",
+            type: $"com.listo.notification.{domainEvent.GetType().Name.ToLower()}",
+            jsonSerializableData: domainEvent)
+        {
+            Id = domainEvent.EventId,
+            Time = domainEvent.OccurredAt
+        };
+        
+        var message = new ServiceBusMessage(BinaryData.FromObjectAsJson(cloudEvent));
+        await _sender.SendMessageAsync(message, ct);
+    }
+}
+```
+
+**Outbox Pattern (Future Enhancement):**
+
+```csharp
+public class OutboxEventDispatcher : IDomainEventDispatcher
+{
+    private readonly IAppDbContext _dbContext;
+    
+    public async Task DispatchAsync<TEvent>(TEvent domainEvent, CancellationToken ct)
+        where TEvent : IDomainEvent
+    {
+        // Store event in outbox table (same transaction as entity changes)
+        var outboxEvent = new OutboxEvent
+        {
+            EventId = domainEvent.EventId,
+            EventType = domainEvent.GetType().FullName,
+            Payload = JsonSerializer.Serialize(domainEvent),
+            OccurredAt = domainEvent.OccurredAt,
+            Processed = false
+        };
+        
+        _dbContext.OutboxEvents.Add(outboxEvent);
+        await _dbContext.SaveChangesAsync(ct);
+    }
+}
+
+// Background service processes outbox and publishes to Service Bus
+```
+
+---
+
+### 23.7. Testing Approach Per Layer
+
+**Domain Layer (Pure Unit Tests):**
+
+```csharp
+public class NotificationTests
+{
+    [Fact]
+    public void Create_WithValidData_ReturnsNotification()
+    {
+        // Arrange
+        var request = new SendNotificationRequest
+        {
+            UserId = "user-123",
+            Channel = "email",
+            TemplateKey = "order-confirmation"
+        };
+        
+        // Act
+        var notification = Notification.Create(request);
+        
+        // Assert
+        notification.Should().NotBeNull();
+        notification.Status.Should().Be(NotificationStatus.Pending);
+    }
+}
+```
+
+**Application Layer (Service Tests with Fakes):**
+
+```csharp
+public class NotificationServiceTests
+{
+    private readonly NotificationService _sut;
+    private readonly FakeNotificationRepository _fakeRepo;
+    private readonly FakeSendingService _fakeSender;
+    
+    public NotificationServiceTests()
+    {
+        _fakeRepo = new FakeNotificationRepository();
+        _fakeSender = new FakeSendingService();
+        _sut = new NotificationService(_fakeRepo, _fakeSender);
+    }
+    
+    [Fact]
+    public async Task SendAsync_ValidRequest_ReturnsSuccess()
+    {
+        // Arrange
+        var request = new SendNotificationRequest { /* ... */ };
+        
+        // Act
+        var result = await _sut.SendAsync(request);
+        
+        // Assert
+        result.Success.Should().BeTrue();
+        _fakeRepo.Notifications.Should().ContainSingle();
+        _fakeSender.SentMessages.Should().ContainSingle();
+    }
+}
+```
+
+**Infrastructure Layer (Contract Tests with Sandbox):**
+
+```csharp
+public class TwilioSmsClientTests
+{
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task SendAsync_ValidMessage_SucceedsWithTwilioSandbox()
+    {
+        // Arrange
+        var client = new TwilioSmsClient(/* sandbox credentials */);
+        var message = new SmsMessage
+        {
+            To = "+15005550006", // Twilio magic number
+            Body = "Test message"
+        };
+        
+        // Act
+        var result = await client.SendAsync(message);
+        
+        // Assert
+        result.Success.Should().BeTrue();
+    }
+}
+```
+
+**API Layer (Minimal E2E with TestServer):**
+
+```csharp
+public class NotificationsControllerTests : IClassFixture<WebApplicationFactory<Program>>
+{
+    private readonly HttpClient _client;
+    
+    public NotificationsControllerTests(WebApplicationFactory<Program> factory)
+    {
+        _client = factory.CreateClient();
+    }
+    
+    [Fact]
+    public async Task SendNotification_WithValidToken_Returns202()
+    {
+        // Arrange
+        var request = new SendNotificationRequest { /* ... */ };
+        _client.DefaultRequestHeaders.Authorization = 
+            new AuthenticationHeaderValue("Bearer", TestTokens.ValidAdminToken);
+        
+        // Act
+        var response = await _client.PostAsJsonAsync("/api/v1/notifications", request);
+        
+        // Assert
+        response.StatusCode.Should().Be(HttpStatusCode.Accepted);
+    }
+}
+```
+
+---
+
+### 23.8. Benefits and Trade-offs
+
+**Benefits:**
+
+✅ **Clear separation of concerns** - Each layer has a well-defined responsibility  
+✅ **Testability** - Easy to unit test with fakes and mocks  
+✅ **Performance** - No extra mediation layer (MediatR); direct service orchestration  
+✅ **Simplicity** - Easier to reason about and debug  
+✅ **Flexibility** - Swap implementations (e.g., switch from SendGrid to SES) without changing Application layer  
+
+**Trade-offs:**
+
+⚠️ **More wiring code** - Explicit DI registration and service dependencies  
+⚠️ **Disciplined boundaries required** - Developers must respect dependency rules  
+⚠️ **Less "magic"** - No automatic request/response pipelines (must build manually if needed)  
+
+---
+
+## 24. Maintenance & Future Enhancements (Long-Term and Technical Debt)
+
+> **Note:** This section complements Section 19 (Routine Operations) and focuses on **long-term evolution, technical debt management, and observability roadmap**.
+
+---
+
+### 24.1. Long-Term Evolution
+
+**Full CloudEvents Adoption:**
+
+- **Goal:** Standardize all event payloads across Listo.Auth, Listo.Orders, Listo.RideSharing, and Listo.Notification using CloudEvents 1.0
+- **Benefits:**
+  - Interoperability and portability
+  - Vendor-neutral event format
+  - Easier integration with third-party event brokers and SaaS tools
+
+**Shared Schema Registry:**
+
+- **Goal:** Centralized schema registry (e.g., Azure Schema Registry or Confluent Schema Registry) for event definitions
+- **Benefits:**
+  - Schema versioning and evolution
+  - Automatic validation of event payloads
+  - Documentation and discoverability
+
+**Outbox/Inbox Patterns:**
+
+- **Goal:** Implement transactional outbox pattern for exactly-once semantics
+- **Implementation:**
+  - Outbox table stores events in same transaction as entity changes
+  - Background worker publishes events to Service Bus
+  - Inbox table deduplicates incoming events
+
+```csharp
+public class OutboxProcessor : BackgroundService
+{
+    private readonly IServiceProvider _serviceProvider;
+    
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            using var scope = _serviceProvider.CreateScope();
+            var dbContext = scope.ServiceProvider.GetRequiredService<IAppDbContext>();
+            var serviceBusSender = scope.ServiceProvider.GetRequiredService<ServiceBusSender>();
+            
+            // Fetch unprocessed events
+            var events = await dbContext.OutboxEvents
+                .Where(e => !e.Processed)
+                .OrderBy(e => e.OccurredAt)
+                .Take(100)
+                .ToListAsync(stoppingToken);
+            
+            foreach (var evt in events)
+            {
+                // Publish to Service Bus
+                var message = new ServiceBusMessage(evt.Payload)
+                {
+                    MessageId = evt.EventId,
+                    ContentType = "application/cloudevents+json"
+                };
+                
+                await serviceBusSender.SendMessageAsync(message, stoppingToken);
+                
+                // Mark as processed
+                evt.Processed = true;
+                evt.ProcessedAt = DateTime.UtcNow;
+            }
+            
+            await dbContext.SaveChangesAsync(stoppingToken);
+            
+            // Poll every 5 seconds
+            await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+        }
+    }
+}
+```
+
+**Multi-Region Active-Active:**
+
+- **Goal:** Deploy Listo.Notification in multiple Azure regions (e.g., East US, West Europe) with active-active configuration
+- **Components:**
+  - Azure Traffic Manager or Front Door for global load balancing
+  - Regional SQL databases with replication or Cosmos DB multi-region writes
+  - Regional Service Bus namespaces with geo-replication
+
+**Provider-Agnostic Abstraction with Weighted Routing:**
+
+- **Goal:** Abstract provider selection logic to support multiple SMS/Email providers with cost-aware routing
+- **Example:**
+
+```csharp
+public class WeightedProviderSelector
+{
+    private readonly List<ProviderOption> _providers;
+    
+    public IEmailSender SelectEmailProvider()
+    {
+        // Weighted random selection based on cost and success rate
+        var totalWeight = _providers.Sum(p => p.Weight);
+        var random = Random.Shared.NextDouble() * totalWeight;
+        
+        double cumulative = 0;
+        foreach (var provider in _providers)
+        {
+            cumulative += provider.Weight;
+            if (random < cumulative)
+            {
+                return provider.Sender;
+            }
+        }
+        
+        return _providers.First().Sender;
+    }
+}
+
+public class ProviderOption
+{
+    public IEmailSender Sender { get; set; }
+    public double Weight { get; set; } // Higher = more likely to be selected
+    public decimal CostPer1000 { get; set; }
+    public double SuccessRate { get; set; }
+}
+```
+
+---
+
+### 24.2. Technical Debt Management
+
+**Catalog TODOs in Code:**
+
+Tag technical debt items with structured comments:
+
+```csharp
+// TODO [tech-debt] [due:2025-12-31] [priority:medium]
+// Refactor TemplateRenderer to support Liquid templates in addition to Handlebars
+public string RenderTemplate(Template template, object data)
+{
+    // Current: Basic string interpolation
+    // Future: Full Liquid/Handlebars support
+}
+```
+
+**Quarterly Architecture Review:**
+
+- **Schedule:** Last week of each quarter
+- **Participants:** Engineering team, architect, product owner
+- **Topics:**
+  - Performance bottlenecks and optimization opportunities
+  - Cost analysis and optimization
+  - Security posture review
+  - Dependency updates and vulnerabilities
+  - Technical debt prioritization
+
+**Example Review Agenda:**
+
+1. **Performance (30 min)**
+   - Review P95/P99 latencies
+   - Identify slow queries and optimize
+   - Assess cache hit ratios
+
+2. **Cost (20 min)**
+   - Analyze Azure spend by resource
+   - Identify underutilized resources
+   - Review provider costs (Twilio, SendGrid)
+
+3. **Security (20 min)**
+   - Review Defender alerts
+   - Check Key Vault access logs
+   - Assess dependency vulnerabilities
+
+4. **Tech Debt (30 min)**
+   - Review cataloged TODOs
+   - Prioritize based on impact and effort
+   - Allocate capacity for next sprint
+
+**Decompose Large Services:**
+
+As scale grows, consider splitting into focused components:
+
+- **Template Service:** Dedicated microservice for template management and rendering
+- **Delivery Service:** Separate service for provider integrations
+- **Analytics Service:** Real-time analytics and reporting
+
+---
+
+### 24.3. Observability Roadmap
+
+**OpenTelemetry Adoption:**
+
+**Goal:** Implement OpenTelemetry for distributed tracing, metrics, and logs end-to-end
+
+**Implementation:**
+
+```csharp
+// Program.cs
+builder.Services.AddOpenTelemetry()
+    .WithTracing(tracing =>
+    {
+        tracing
+            .AddAspNetCoreInstrumentation()
+            .AddHttpClientInstrumentation()
+            .AddSqlClientInstrumentation()
+            .AddSource("Listo.Notification")
+            .AddAzureMonitorTraceExporter(options =>
+            {
+                options.ConnectionString = builder.Configuration["ApplicationInsights:ConnectionString"];
+            });
+    })
+    .WithMetrics(metrics =>
+    {
+        metrics
+            .AddAspNetCoreInstrumentation()
+            .AddHttpClientInstrumentation()
+            .AddRuntimeInstrumentation()
+            .AddMeter("Listo.Notification")
+            .AddAzureMonitorMetricExporter(options =>
+            {
+                options.ConnectionString = builder.Configuration["ApplicationInsights:ConnectionString"];
+            });
+    });
+
+// Custom instrumentation
+var activitySource = new ActivitySource("Listo.Notification");
+
+using var activity = activitySource.StartActivity("SendNotification");
+activity?.SetTag("notification.channel", "email");
+activity?.SetTag("notification.tenant", tenantId);
+```
+
+**SLOs and Error Budgets:**
+
+**Service Level Objectives (SLOs):**
+
+| Service | SLO | Measurement Window |
+|---------|-----|-----------------|
+| API availability | 99.9% | 30 days |
+| Email delivery time (P95) | < 30s | 7 days |
+| SMS delivery time (P95) | < 10s | 7 days |
+| Push delivery time (P95) | < 5s | 7 days |
+
+**Error Budget:**
+
+- **Formula:** `Error Budget = (1 - SLO) * Total Requests`
+- **Example:** 99.9% SLO = 0.1% error budget = 1 error per 1000 requests
+
+**Release Policy:**
+
+- If error budget depleted: Freeze non-critical releases, focus on reliability
+- If error budget healthy: Proceed with feature releases
+
+**SLO Monitoring:**
+
+```kusto
+// Application Insights query for API availability SLO
+requests
+| where timestamp > ago(30d)
+| summarize 
+    Total = count(),
+    Failed = countif(success == false),
+    Availability = 100.0 * (1.0 - todouble(countif(success == false)) / count())
+| extend SLO = 99.9
+| extend ErrorBudget = (100.0 - SLO) * Total / 100.0
+| extend ErrorBudgetRemaining = ErrorBudget - Failed
+| project Total, Failed, Availability, SLO, ErrorBudgetRemaining
+```
+
+---
+
+### 24.4. Backlog Candidates for Future Sprints
+
+**Web-Based Template Editor:**
+
+- **Features:**
+  - WYSIWYG HTML editor for email templates
+  - Live preview with sample data
+  - Localization support (edit translations inline)
+  - Version history and rollback
+  - Template validation (syntax, placeholders)
+
+**In-App Notification Center:**
+
+- **Features:**
+  - Persistent notification inbox (90-day retention)
+  - Read/unread status sync across devices
+  - Mark all as read
+  - Push-to-inbox consolidation (reduce push spam)
+  - Notification categories and filtering
+
+**Provider Delivery Analytics:**
+
+- **Features:**
+  - Dashboard with delivery success rates per provider
+  - Cost per channel and provider
+  - Bounce and complaint rates (email)
+  - Cohort analysis (e.g., delivery time by country)
+  - A/B test results for template variations
+
+**Rate-Limit Self-Service Controls:**
+
+- **Features:**
+  - Tenant admin portal for quota management
+  - Real-time rate limit usage visualization
+  - Temporary quota increase requests
+  - Budget alerts configuration
+
+---
+
 **Summary:**  
 This plan ensures a robust, secure, and scalable Notification & Communication Service API using modern .NET and Azure best practices, with SQL Server as the data store and full support for the requirements in `notification_api_endpoints.md`. The architecture supports push, SMS, email, in-app messaging, analytics, and user preferences, with integrations for FCM, Twilio, and SendGrid/Azure Communication
