@@ -1,3 +1,5 @@
+using Listo.Notification.Application.DTOs;
+
 namespace Listo.Notification.Application.Interfaces;
 
 /// <summary>
@@ -49,4 +51,41 @@ public interface ITemplateRenderingService
     /// </summary>
     /// <param name="templateKey">Key of the template to remove.</param>
     void RemoveFromCache(string templateKey);
+
+    // Template CRUD Operations
+    Task<PagedTemplatesResponse> GetTemplatesAsync(
+        Guid tenantId,
+        int pageNumber,
+        int pageSize,
+        string? channel,
+        bool? isActive,
+        CancellationToken cancellationToken = default);
+
+    Task<TemplateResponse?> GetTemplateByIdAsync(
+        Guid tenantId,
+        Guid templateId,
+        CancellationToken cancellationToken = default);
+
+    Task<TemplateResponse> CreateTemplateAsync(
+        Guid tenantId,
+        CreateTemplateRequest request,
+        CancellationToken cancellationToken = default);
+
+    Task<TemplateResponse?> UpdateTemplateAsync(
+        Guid tenantId,
+        Guid templateId,
+        UpdateTemplateRequest request,
+        CancellationToken cancellationToken = default);
+
+    Task<bool> DeleteTemplateAsync(
+        Guid tenantId,
+        Guid templateId,
+        CancellationToken cancellationToken = default);
+
+    Task<RenderTemplateResponse> RenderTemplateAsync(
+        Guid tenantId,
+        string templateKey,
+        Dictionary<string, object> variables,
+        string locale,
+        CancellationToken cancellationToken = default);
 }

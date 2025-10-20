@@ -80,6 +80,14 @@ public record ScheduleNotificationRequest : SendNotificationRequest
 }
 
 /// <summary>
+/// Request to cancel a notification.
+/// </summary>
+public record CancelNotificationRequest
+{
+    public string Reason { get; init; } = string.Empty;
+}
+
+/// <summary>
 /// Request to create user notification preferences.
 /// </summary>
 public record CreatePreferencesRequest

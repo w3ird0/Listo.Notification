@@ -143,4 +143,89 @@ public class NotificationsController : ControllerBase
 
         return Ok(stats);
     }
+
+    /// <summary>
+    /// Schedule a notification for future delivery.
+    /// </summary>
+    [HttpPost("schedule")]
+    [ProducesResponseType(typeof(SendNotificationResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<ActionResult<SendNotificationResponse>> ScheduleNotification(
+        [FromBody] ScheduleNotificationRequest request,
+        CancellationToken cancellationToken)
+    {
+        var tenantId = TenantContext.GetRequiredTenantId(HttpContext);
+        var userId = Guid.Parse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? throw new InvalidOperationException("UserId claim missing"));
+
+        _logger.LogInformation(
+            "Scheduling notification: TenantId={TenantId}, UserId={UserId}, Channel={Channel}, ScheduledFor={ScheduledFor}",
+            tenantId, userId, request.Channel, request.ScheduledFor);
+
+        var response = await _notificationService.ScheduleNotificationAsync(
+            tenantId,
+            userId,
+            request,
+            cancellationToken);
+
+        return Ok(response);
+    }
+
+    /// <summary>
+    /// Cancel a scheduled or pending notification.
+    /// </summary>
+    [HttpPost("{id:guid}/cancel")]
+    [ProducesResponseType(typeof(NotificationResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<NotificationResponse>> CancelNotification(
+        Guid id,
+        [FromBody] CancelNotificationRequest request,
+        CancellationToken cancellationToken)
+    {
+        var tenantId = TenantContext.GetRequiredTenantId(HttpContext);
+        var userId = Guid.Parse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? throw new InvalidOperationException("UserId claim missing"));
+
+        _logger.LogInformation(
+            "Canceling notification: TenantId={TenantId}, UserId={UserId}, NotificationId={NotificationId}",
+            tenantId, userId, id);
+
+        var notification = await _notificationService.CancelNotificationAsync(
+            tenantId,
+            userId,
+            id,
+            request.Reason,
+            cancellationToken);
+
+        return notification != null ? Ok(notification) : NotFound();
+    }
+
+    /// <summary>
+    /// Get user's notifications with advanced filtering.
+    /// </summary>
+    [HttpGet("list")]
+    [ProducesResponseType(typeof(PagedNotificationsResponse), StatusCodes.Status200OK)]
+    public async Task<ActionResult<PagedNotificationsResponse>> GetNotificationsList(
+        [FromQuery] int pageNumber = 1,
+        [FromQuery] int pageSize = 50,
+        [FromQuery] string? channel = null,
+        [FromQuery] string? status = null,
+        CancellationToken cancellationToken = default)
+    {
+        var tenantId = TenantContext.GetRequiredTenantId(HttpContext);
+        var userId = Guid.Parse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? throw new InvalidOperationException("UserId claim missing"));
+
+        _logger.LogInformation(
+            "Fetching filtered notifications: TenantId={TenantId}, UserId={UserId}, Channel={Channel}, Status={Status}",
+            tenantId, userId, channel, status);
+
+        var response = await _notificationService.GetNotificationsAsync(
+            tenantId,
+            userId,
+            pageNumber,
+            pageSize,
+            channel,
+            status,
+            cancellationToken);
+
+        return Ok(response);
+    }
 }

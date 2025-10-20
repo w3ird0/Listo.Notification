@@ -1,3 +1,5 @@
+using Listo.Notification.Application.DTOs;
+
 namespace Listo.Notification.Application.Interfaces;
 
 /// <summary>
@@ -37,5 +39,16 @@ public interface IRateLimiterService
         Guid tenantId,
         string userId,
         string channel,
+        CancellationToken cancellationToken = default);
+
+    // Admin Operations
+    Task<object> GetRateLimitConfigAsync(
+        string tenantId,
+        string? userId,
+        string? channel,
+        CancellationToken cancellationToken = default);
+
+    Task UpdateRateLimitConfigAsync(
+        UpdateRateLimitRequest request,
         CancellationToken cancellationToken = default);
 }
