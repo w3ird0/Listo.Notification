@@ -877,9 +877,397 @@ dotnet ef database update --project src/Listo.Notification.Infrastructure
 
 ## 5. Authentication & Authorization
 
-- **JWT Authentication:** Use Microsoft.AspNetCore.Authentication.JwtBearer.
-- **Role-based Authorization:** Implement policies for Customer, Driver, Support, Admin.
-- **Azure AD Integration:** For enterprise scenarios.
+### 5.1. Client Authentication (User Requests)
+
+**Method:** JWT Bearer Token Authentication
+
+**Token Issuer:** Listo.Auth service
+
+**Configuration:**
+```csharp
+// Program.cs or Startup.cs
+services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        options.Authority = configuration["Auth:Authority"]; // Listo.Auth URL
+        options.Audience = "listo-notification-api";
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = true,
+            ValidateAudience = true,
+            ValidateLifetime = true,
+            ValidateIssuerSigningKey = true,
+            ClockSkew = TimeSpan.FromMinutes(5)
+        };
+    });
+```
+
+**JWT Claims Expected:**
+- `sub`: User ID (maps to UserId in our tables)
+- `role`: User roles (Customer, Driver, Support, Admin)
+- `permissions`: Granular permissions array
+- `email`: User email (for audit logging)
+- `name`: User display name
+
+**Usage:**
+```csharp
+[Authorize] // Requires any authenticated user
+[Authorize(Roles = "Admin")] // Requires Admin role
+[Authorize(Policy = "ManageTemplates")] // Requires specific policy
+```
+
+---
+
+### 5.2. Service-to-Service Authentication
+
+**Method:** Shared Secret Header (`X-Service-Secret`)
+
+**Secret Storage:** Azure Key Vault
+
+**Secret Names (per service):**
+- `listo-auth-service-secret`
+- `listo-orders-service-secret`
+- `listo-ridesharing-service-secret`
+- `listo-products-service-secret`
+
+**Implementation:**
+```csharp
+// Middleware: ServiceSecretAuthenticationMiddleware.cs
+public class ServiceSecretAuthenticationMiddleware
+{
+    private readonly RequestDelegate _next;
+    private readonly IConfiguration _configuration;
+    private readonly Dictionary<string, string> _serviceSecrets;
+
+    public ServiceSecretAuthenticationMiddleware(
+        RequestDelegate next,
+        IConfiguration configuration,
+        IKeyVaultService keyVaultService)
+    {
+        _next = next;
+        _configuration = configuration;
+        
+        // Load secrets from Key Vault on startup
+        _serviceSecrets = new Dictionary<string, string>
+        {
+            ["auth"] = keyVaultService.GetSecret("listo-auth-service-secret"),
+            ["orders"] = keyVaultService.GetSecret("listo-orders-service-secret"),
+            ["ridesharing"] = keyVaultService.GetSecret("listo-ridesharing-service-secret"),
+            ["products"] = keyVaultService.GetSecret("listo-products-service-secret")
+        };
+    }
+
+    public async Task InvokeAsync(HttpContext context)
+    {
+        // Only check secret for internal endpoints
+        if (context.Request.Path.StartsWithSegments("/api/v1/internal"))
+        {
+            if (!context.Request.Headers.TryGetValue("X-Service-Secret", out var secretHeader))
+            {
+                context.Response.StatusCode = 401;
+                await context.Response.WriteAsJsonAsync(new
+                {
+                    error = new
+                    {
+                        code = "MISSING_SERVICE_SECRET",
+                        message = "X-Service-Secret header is required for internal endpoints"
+                    }
+                });
+                return;
+            }
+
+            var providedSecret = secretHeader.ToString();
+            var isValid = _serviceSecrets.Values.Any(secret => 
+                CryptographicOperations.FixedTimeEquals(
+                    Encoding.UTF8.GetBytes(secret),
+                    Encoding.UTF8.GetBytes(providedSecret)
+                ));
+
+            if (!isValid)
+            {
+                context.Response.StatusCode = 403;
+                await context.Response.WriteAsJsonAsync(new
+                {
+                    error = new
+                    {
+                        code = "INVALID_SERVICE_SECRET",
+                        message = "Invalid service secret provided"
+                    }
+                });
+                return;
+            }
+
+            // Add service origin to context for auditing
+            var serviceOrigin = _serviceSecrets.FirstOrDefault(x => 
+                CryptographicOperations.FixedTimeEquals(
+                    Encoding.UTF8.GetBytes(x.Value),
+                    Encoding.UTF8.GetBytes(providedSecret)
+                )).Key;
+            
+            context.Items["ServiceOrigin"] = serviceOrigin;
+        }
+
+        await _next(context);
+    }
+}
+```
+
+**Secret Rotation Strategy:**
+1. Generate new secret in Key Vault with versioning
+2. Update calling services to use new secret
+3. Configure grace period (7 days) where both old and new secrets are valid
+4. After grace period, remove old secret from validation
+5. Automated rotation every 90 days via Azure Function
+
+---
+
+### 5.3. Required Headers
+
+**For Client Requests:**
+```http
+Authorization: Bearer {jwt_token}
+Content-Type: application/json
+X-Correlation-Id: {uuid}  # Required for tracing
+X-Idempotency-Key: {unique_key}  # Required for POST operations
+```
+
+**For Service-to-Service Requests:**
+```http
+X-Service-Secret: {shared_secret}
+Content-Type: application/json
+X-Correlation-Id: {uuid}  # Required for tracing
+X-Idempotency-Key: {unique_key}  # Required for POST operations
+traceparent: {w3c_trace_context}  # OpenTelemetry tracing
+```
+
+---
+
+### 5.4. Role-Based Authorization
+
+**Roles Defined by Listo.Auth:**
+- **Customer:** Can view own notifications and preferences
+- **Driver:** Can view own notifications and preferences
+- **Support:** Can view all notifications, manage support conversations
+- **Admin:** Full access to all features, templates, analytics
+
+**Authorization Policies:**
+```csharp
+// Program.cs
+services.AddAuthorization(options =>
+{
+    // Customer policies
+    options.AddPolicy("ViewOwnNotifications", policy =>
+        policy.RequireAuthenticatedUser()
+              .RequireAssertion(context => 
+                  context.User.HasClaim("sub", context.Resource.ToString())));
+
+    // Admin policies
+    options.AddPolicy("ManageTemplates", policy =>
+        policy.RequireRole("Admin"));
+
+    options.AddPolicy("ViewAnalytics", policy =>
+        policy.RequireRole("Admin", "Support"));
+
+    options.AddPolicy("ManageCostBudgets", policy =>
+        policy.RequireRole("Admin"));
+
+    // Support policies
+    options.AddPolicy("AccessSupportConversations", policy =>
+        policy.RequireRole("Support", "Admin"));
+});
+```
+
+**Controller Usage:**
+```csharp
+[ApiController]
+[Route("api/v1/notifications")]
+[Authorize]
+public class NotificationsController : ControllerBase
+{
+    [HttpGet]
+    [Authorize(Policy = "ViewOwnNotifications")]
+    public async Task<IActionResult> GetMyNotifications()
+    {
+        var userId = User.FindFirst("sub")?.Value;
+        // ...
+    }
+
+    [HttpPost("templates")]
+    [Authorize(Policy = "ManageTemplates")]
+    public async Task<IActionResult> CreateTemplate([FromBody] TemplateDto template)
+    {
+        // ...
+    }
+}
+```
+
+---
+
+### 5.5. HTTPS & Transport Security
+
+**Enforcement:**
+```csharp
+// Program.cs
+app.UseHttpsRedirection();
+app.UseHsts(); // HTTP Strict Transport Security
+
+// Add HSTS configuration
+services.AddHsts(options =>
+{
+    options.MaxAge = TimeSpan.FromDays(365);
+    options.IncludeSubDomains = true;
+    options.Preload = true;
+});
+```
+
+**Certificate Management:**
+- Use Azure App Service managed certificates
+- Automatic renewal enabled
+- TLS 1.2 minimum (TLS 1.3 preferred)
+
+---
+
+### 5.6. Input Validation & Request Limits
+
+**Request Size Limits:**
+```csharp
+// Program.cs
+services.Configure<KestrelServerOptions>(options =>
+{
+    options.Limits.MaxRequestBodySize = 10 * 1024 * 1024; // 10 MB max
+    options.Limits.MaxRequestHeadersTotalSize = 32 * 1024; // 32 KB
+    options.Limits.MaxRequestHeaderCount = 100;
+});
+
+services.Configure<FormOptions>(options =>
+{
+    options.MultipartBodyLengthLimit = 10 * 1024 * 1024; // 10 MB for file uploads
+});
+```
+
+**Input Validation:**
+- Use FluentValidation for request DTOs
+- Validate all user inputs before processing
+- Sanitize data for XSS prevention
+- Use parameterized queries (EF Core handles this)
+
+**Example Validator:**
+```csharp
+public class SendNotificationRequestValidator : AbstractValidator<SendNotificationRequest>
+{
+    public SendNotificationRequestValidator()
+    {
+        RuleFor(x => x.UserId)
+            .NotEmpty()
+            .Must(BeValidGuid).WithMessage("UserId must be a valid GUID");
+
+        RuleFor(x => x.Channel)
+            .NotEmpty()
+            .Must(x => new[] { "push", "sms", "email", "inApp" }.Contains(x))
+            .WithMessage("Channel must be push, sms, email, or inApp");
+
+        RuleFor(x => x.TemplateKey)
+            .NotEmpty()
+            .MaximumLength(100)
+            .Matches("^[a-z0-9_]+$").WithMessage("TemplateKey must be lowercase alphanumeric with underscores");
+    }
+
+    private bool BeValidGuid(string value) => Guid.TryParse(value, out _);
+}
+```
+
+---
+
+### 5.7. CORS Configuration
+
+**Policy:**
+```csharp
+// Program.cs
+services.AddCors(options =>
+{
+    options.AddPolicy("ListoFrontends", builder =>
+    {
+        builder
+            .WithOrigins(
+                configuration["Cors:AllowedOrigins"].Split(",") // From appsettings
+            )
+            .AllowAnyMethod()
+            .AllowAnyHeader()
+            .WithExposedHeaders("X-Correlation-Id", "X-RateLimit-Remaining")
+            .AllowCredentials(); // For SignalR
+    });
+});
+
+app.UseCors("ListoFrontends");
+```
+
+**appsettings.json:**
+```json
+{
+  "Cors": {
+    "AllowedOrigins": "https://app.listoexpress.com,https://admin.listoexpress.com,https://driver.listoexpress.com"
+  }
+}
+```
+
+---
+
+### 5.8. Security Headers
+
+**Middleware:**
+```csharp
+app.Use(async (context, next) =>
+{
+    context.Response.Headers.Add("X-Content-Type-Options", "nosniff");
+    context.Response.Headers.Add("X-Frame-Options", "DENY");
+    context.Response.Headers.Add("X-XSS-Protection", "1; mode=block");
+    context.Response.Headers.Add("Referrer-Policy", "strict-origin-when-cross-origin");
+    context.Response.Headers.Add("Content-Security-Policy", 
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'");
+    
+    await next();
+});
+```
+
+---
+
+### 5.9. Authentication Flow Examples
+
+**Client Request Flow:**
+```
+1. Client → Listo.Auth: POST /auth/login
+2. Listo.Auth → Client: {accessToken, refreshToken}
+3. Client → Listo.Notification: GET /api/v1/notifications
+   Headers: Authorization: Bearer {accessToken}
+4. Listo.Notification validates JWT with Listo.Auth's public key
+5. Listo.Notification → Client: {notifications}
+```
+
+**Service-to-Service Flow:**
+```
+1. Listo.Orders → Azure Key Vault: Get listo-orders-service-secret
+2. Listo.Orders → Listo.Notification: POST /api/v1/internal/notifications/queue
+   Headers: X-Service-Secret: {secret}, X-Correlation-Id: {uuid}
+3. Listo.Notification validates secret against Key Vault secrets
+4. Listo.Notification → Listo.Orders: 200 OK {notificationId}
+```
+
+---
+
+### 5.10. Security Checklist
+
+- [ ] JWT validation configured with correct issuer and audience
+- [ ] Service secret middleware validates all `/internal` endpoints
+- [ ] Secrets stored in Azure Key Vault (never in code or config files)
+- [ ] Secret rotation policy implemented (90-day cycle)
+- [ ] HTTPS enforced with HSTS enabled
+- [ ] CORS configured with explicit allowed origins
+- [ ] Request size limits enforced (10 MB max)
+- [ ] Input validation with FluentValidation on all DTOs
+- [ ] Security headers added (XSS, Frame Options, CSP)
+- [ ] Rate limiting implemented (see Section 7)
+- [ ] Correlation IDs required and propagated
+- [ ] Audit logging for all sensitive operations
 
 ---
 
