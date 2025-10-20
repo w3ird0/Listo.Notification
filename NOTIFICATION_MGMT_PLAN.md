@@ -1897,22 +1897,1352 @@ Content-Type: application/json
 
 ---
 
-## 6. API Implementation
+## 7. API Implementation
 
-- **Controllers:** Scaffold controllers for each resource (Notifications, Devices, Messages, SMS, Email, Preferences, Analytics, Health).
-- **Endpoints:** Implement all endpoints as per the spec, including:
-  - Pagination, filtering, sorting (query params)
-  - CRUD operations for templates, preferences, devices
-  - Sending and scheduling notifications (push, sms, email)
-  - In-app messaging (conversations, messages, participants)
-  - File upload for messaging (integrate with Azure Blob Storage)
-  - Analytics and health endpoints
-- **Business Logic:** Place in Application layer/services.
-- **Data Access:** Use EF Core in Infrastructure layer.
+This section outlines the API layer structure, controller design, endpoint implementations, and integration with the application and infrastructure layers.
+
+### 7.1. Project Structure
+
+```
+Listo.Notification/
+├── Listo.Notification.API/
+│   ├── Controllers/
+│   │   ├── NotificationsController.cs
+│   │   ├── DevicesController.cs
+│   │   ├── MessagesController.cs
+│   │   ├── ConversationsController.cs
+│   │   ├── PreferencesController.cs
+│   │   ├── TemplatesController.cs
+│   │   ├── AnalyticsController.cs
+│   │   ├── HealthController.cs
+│   │   └── Internal/
+│   │       ├── InternalNotificationsController.cs
+│   │       └── ServiceBusWebhooksController.cs
+│   ├── Middleware/
+│   │   ├── ExceptionHandlingMiddleware.cs
+│   │   ├── ServiceAuthenticationMiddleware.cs
+│   │   └── RequestLoggingMiddleware.cs
+│   ├── Filters/
+│   │   ├── ValidateModelStateAttribute.cs
+│   │   └── ApiKeyAuthorizationAttribute.cs
+│   ├── Extensions/
+│   │   ├── ServiceCollectionExtensions.cs
+│   │   └── ApplicationBuilderExtensions.cs
+│   ├── Models/
+│   │   ├── Requests/
+│   │   ├── Responses/
+│   │   └── DTOs/
+│   ├── Program.cs
+│   └── appsettings.json
+│
+├── Listo.Notification.Application/
+│   ├── Services/
+│   │   ├── NotificationService.cs
+│   │   ├── DeviceService.cs
+│   │   ├── MessageService.cs
+│   │   ├── TemplateService.cs
+│   │   ├── AnalyticsService.cs
+│   │   └── Interfaces/
+│   ├── Commands/
+│   ├── Queries/
+│   ├── Validators/
+│   └── Mappings/
+│
+└── Listo.Notification.Infrastructure/
+    ├── Data/
+    │   ├── NotificationDbContext.cs
+    │   └── Repositories/
+    ├── Providers/
+    │   ├── FcmPushProvider.cs
+    │   ├── TwilioSmsProvider.cs
+    │   ├── SendGridEmailProvider.cs
+    │   └── SignalRProvider.cs
+    ├── ServiceBus/
+    │   ├── ServiceBusProcessor.cs
+    │   └── ServiceBusPublisher.cs
+    └── Storage/
+        └── AzureBlobStorageService.cs
+```
 
 ---
 
-## 7. Validation & Error Handling
+### 7.2. Controller Design Patterns
+
+#### Base Controller
+
+```csharp
+using Microsoft.AspNetCore.Mvc;
+using Listo.Notification.Application.Common;
+
+namespace Listo.Notification.API.Controllers;
+
+[ApiController]
+[Route("api/v1/[controller]")]
+[Produces("application/json")]
+public abstract class ApiControllerBase : ControllerBase
+{
+    protected IActionResult ApiResponse<T>(Result<T> result)
+    {
+        if (result.IsSuccess)
+        {
+            return Ok(new ApiSuccessResponse<T>
+            {
+                Success = true,
+                Data = result.Value,
+                Message = result.Message
+            });
+        }
+
+        return result.ErrorType switch
+        {
+            ErrorType.NotFound => NotFound(new ApiErrorResponse
+            {
+                Success = false,
+                Error = result.Error,
+                Message = result.Message
+            }),
+            ErrorType.Validation => BadRequest(new ApiErrorResponse
+            {
+                Success = false,
+                Error = result.Error,
+                Message = result.Message,
+                ValidationErrors = result.ValidationErrors
+            }),
+            ErrorType.Unauthorized => Unauthorized(new ApiErrorResponse
+            {
+                Success = false,
+                Error = "Unauthorized",
+                Message = result.Message
+            }),
+            _ => StatusCode(500, new ApiErrorResponse
+            {
+                Success = false,
+                Error = "InternalServerError",
+                Message = result.Message
+            })
+        };
+    }
+
+    protected IActionResult ApiResponse(Result result)
+    {
+        if (result.IsSuccess)
+        {
+            return Ok(new ApiSuccessResponse
+            {
+                Success = true,
+                Message = result.Message
+            });
+        }
+
+        return BadRequest(new ApiErrorResponse
+        {
+            Success = false,
+            Error = result.Error,
+            Message = result.Message
+        });
+    }
+}
+```
+
+---
+
+### 7.3. NotificationsController Implementation
+
+```csharp
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using Listo.Notification.Application.Services.Interfaces;
+using Listo.Notification.API.Models.Requests;
+
+namespace Listo.Notification.API.Controllers;
+
+[Authorize]
+public class NotificationsController : ApiControllerBase
+{
+    private readonly INotificationService _notificationService;
+    private readonly ILogger<NotificationsController> _logger;
+
+    public NotificationsController(
+        INotificationService notificationService,
+        ILogger<NotificationsController> logger)
+    {
+        _notificationService = notificationService;
+        _logger = logger;
+    }
+
+    /// <summary>
+    /// Get user notifications with pagination and filtering
+    /// </summary>
+    [HttpGet]
+    [ProducesResponseType(typeof(PaginatedResponse<NotificationDto>), 200)]
+    public async Task<IActionResult> GetNotifications(
+        [FromQuery] NotificationQueryParameters parameters)
+    {
+        var userId = User.GetUserId();
+        var result = await _notificationService.GetUserNotificationsAsync(
+            userId, parameters);
+        return ApiResponse(result);
+    }
+
+    /// <summary>
+    /// Get notification by ID
+    /// </summary>
+    [HttpGet("{id}")]
+    [ProducesResponseType(typeof(NotificationDto), 200)]
+    [ProducesResponseType(404)]
+    public async Task<IActionResult> GetNotification(Guid id)
+    {
+        var userId = User.GetUserId();
+        var result = await _notificationService.GetNotificationByIdAsync(
+            userId, id);
+        return ApiResponse(result);
+    }
+
+    /// <summary>
+    /// Send a notification to a user
+    /// </summary>
+    [HttpPost]
+    [Authorize(Roles = "Admin,System")]
+    [ProducesResponseType(typeof(NotificationDto), 201)]
+    [ProducesResponseType(400)]
+    public async Task<IActionResult> SendNotification(
+        [FromBody] SendNotificationRequest request)
+    {
+        var result = await _notificationService.SendNotificationAsync(request);
+        
+        if (result.IsSuccess)
+        {
+            return CreatedAtAction(
+                nameof(GetNotification),
+                new { id = result.Value.Id },
+                result.Value);
+        }
+        
+        return ApiResponse(result);
+    }
+
+    /// <summary>
+    /// Mark notification as read
+    /// </summary>
+    [HttpPatch("{id}/read")]
+    [ProducesResponseType(204)]
+    [ProducesResponseType(404)]
+    public async Task<IActionResult> MarkAsRead(Guid id)
+    {
+        var userId = User.GetUserId();
+        var result = await _notificationService.MarkAsReadAsync(userId, id);
+        
+        if (result.IsSuccess)
+            return NoContent();
+        
+        return ApiResponse(result);
+    }
+
+    /// <summary>
+    /// Mark all notifications as read
+    /// </summary>
+    [HttpPost("read-all")]
+    [ProducesResponseType(204)]
+    public async Task<IActionResult> MarkAllAsRead()
+    {
+        var userId = User.GetUserId();
+        await _notificationService.MarkAllAsReadAsync(userId);
+        return NoContent();
+    }
+
+    /// <summary>
+    /// Delete notification
+    /// </summary>
+    [HttpDelete("{id}")]
+    [ProducesResponseType(204)]
+    [ProducesResponseType(404)]
+    public async Task<IActionResult> DeleteNotification(Guid id)
+    {
+        var userId = User.GetUserId();
+        var result = await _notificationService.DeleteNotificationAsync(
+            userId, id);
+        
+        if (result.IsSuccess)
+            return NoContent();
+        
+        return ApiResponse(result);
+    }
+
+    /// <summary>
+    /// Get unread notification count
+    /// </summary>
+    [HttpGet("unread/count")]
+    [ProducesResponseType(typeof(int), 200)]
+    public async Task<IActionResult> GetUnreadCount()
+    {
+        var userId = User.GetUserId();
+        var count = await _notificationService.GetUnreadCountAsync(userId);
+        return Ok(new { count });
+    }
+}
+```
+
+---
+
+### 7.4. Internal NotificationsController (Service-to-Service)
+
+```csharp
+using Microsoft.AspNetCore.Mvc;
+using Listo.Notification.API.Filters;
+using Listo.Notification.Application.Services.Interfaces;
+using Listo.Notification.API.Models.Requests;
+
+namespace Listo.Notification.API.Controllers.Internal;
+
+[Route("api/v1/internal/notifications")]
+[ServiceKeyAuthorization]
+public class InternalNotificationsController : ApiControllerBase
+{
+    private readonly INotificationService _notificationService;
+    private readonly ILogger<InternalNotificationsController> _logger;
+
+    public InternalNotificationsController(
+        INotificationService notificationService,
+        ILogger<InternalNotificationsController> logger)
+    {
+        _notificationService = notificationService;
+        _logger = logger;
+    }
+
+    /// <summary>
+    /// Queue notification for processing (used by other services)
+    /// </summary>
+    [HttpPost("queue")]
+    [ProducesResponseType(typeof(QueueNotificationResponse), 200)]
+    [ProducesResponseType(typeof(QueueNotificationResponse), 202)]
+    public async Task<IActionResult> QueueNotification(
+        [FromBody] QueueNotificationRequest request,
+        [FromHeader(Name = "X-Service-Secret")] string serviceSecret,
+        [FromHeader(Name = "X-Correlation-Id")] string correlationId,
+        [FromHeader(Name = "X-Idempotency-Key")] string idempotencyKey)
+    {
+        // For synchronous requests, process immediately and return delivery status
+        if (request.Synchronous)
+        {
+            var result = await _notificationService
+                .ProcessNotificationSynchronouslyAsync(
+                    request, correlationId, idempotencyKey);
+            
+            return Ok(new QueueNotificationResponse
+            {
+                NotificationId = result.NotificationId,
+                Status = result.Status,
+                Channels = result.ChannelResults,
+                ProcessingTimeMs = result.ProcessingTimeMs
+            });
+        }
+
+        // For async requests, queue and return immediately
+        var notificationId = await _notificationService
+            .QueueNotificationAsync(request, correlationId, idempotencyKey);
+        
+        return Accepted(new QueueNotificationResponse
+        {
+            NotificationId = notificationId,
+            Status = "queued",
+            Message = "Notification queued for processing"
+        });
+    }
+
+    /// <summary>
+    /// Batch queue notifications (for bulk operations)
+    /// </summary>
+    [HttpPost("queue/batch")]
+    [ProducesResponseType(typeof(BatchQueueResponse), 202)]
+    public async Task<IActionResult> QueueNotificationBatch(
+        [FromBody] QueueNotificationBatchRequest request,
+        [FromHeader(Name = "X-Service-Secret")] string serviceSecret,
+        [FromHeader(Name = "X-Correlation-Id")] string correlationId)
+    {
+        var result = await _notificationService
+            .QueueNotificationBatchAsync(request, correlationId);
+        
+        return Accepted(new BatchQueueResponse
+        {
+            BatchId = result.BatchId,
+            TotalQueued = result.TotalQueued,
+            Status = "queued"
+        });
+    }
+}
+```
+
+---
+
+### 7.5. DevicesController Implementation
+
+```csharp
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using Listo.Notification.Application.Services.Interfaces;
+using Listo.Notification.API.Models.Requests;
+
+namespace Listo.Notification.API.Controllers;
+
+[Authorize]
+public class DevicesController : ApiControllerBase
+{
+    private readonly IDeviceService _deviceService;
+
+    public DevicesController(IDeviceService deviceService)
+    {
+        _deviceService = deviceService;
+    }
+
+    /// <summary>
+    /// Register or update a device for push notifications
+    /// </summary>
+    [HttpPost]
+    [ProducesResponseType(typeof(DeviceDto), 200)]
+    [ProducesResponseType(typeof(DeviceDto), 201)]
+    public async Task<IActionResult> RegisterDevice(
+        [FromBody] RegisterDeviceRequest request)
+    {
+        var userId = User.GetUserId();
+        var result = await _deviceService.RegisterDeviceAsync(userId, request);
+        
+        if (result.IsSuccess)
+        {
+            return result.IsNewDevice
+                ? CreatedAtAction(nameof(GetDevice), 
+                    new { id = result.Value.Id }, result.Value)
+                : Ok(result.Value);
+        }
+        
+        return ApiResponse(result);
+    }
+
+    /// <summary>
+    /// Get user's registered devices
+    /// </summary>
+    [HttpGet]
+    [ProducesResponseType(typeof(List<DeviceDto>), 200)]
+    public async Task<IActionResult> GetDevices()
+    {
+        var userId = User.GetUserId();
+        var result = await _deviceService.GetUserDevicesAsync(userId);
+        return ApiResponse(result);
+    }
+
+    /// <summary>
+    /// Get device by ID
+    /// </summary>
+    [HttpGet("{id}")]
+    [ProducesResponseType(typeof(DeviceDto), 200)]
+    [ProducesResponseType(404)]
+    public async Task<IActionResult> GetDevice(Guid id)
+    {
+        var userId = User.GetUserId();
+        var result = await _deviceService.GetDeviceByIdAsync(userId, id);
+        return ApiResponse(result);
+    }
+
+    /// <summary>
+    /// Unregister device
+    /// </summary>
+    [HttpDelete("{id}")]
+    [ProducesResponseType(204)]
+    [ProducesResponseType(404)]
+    public async Task<IActionResult> UnregisterDevice(Guid id)
+    {
+        var userId = User.GetUserId();
+        var result = await _deviceService.UnregisterDeviceAsync(userId, id);
+        
+        if (result.IsSuccess)
+            return NoContent();
+        
+        return ApiResponse(result);
+    }
+
+    /// <summary>
+    /// Update device token (for token refresh scenarios)
+    /// </summary>
+    [HttpPatch("{id}/token")]
+    [ProducesResponseType(204)]
+    [ProducesResponseType(404)]
+    public async Task<IActionResult> UpdateDeviceToken(
+        Guid id,
+        [FromBody] UpdateDeviceTokenRequest request)
+    {
+        var userId = User.GetUserId();
+        var result = await _deviceService.UpdateDeviceTokenAsync(
+            userId, id, request.NewToken);
+        
+        if (result.IsSuccess)
+            return NoContent();
+        
+        return ApiResponse(result);
+    }
+}
+```
+
+---
+
+### 7.6. ConversationsController Implementation
+
+```csharp
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using Listo.Notification.Application.Services.Interfaces;
+using Listo.Notification.API.Models.Requests;
+
+namespace Listo.Notification.API.Controllers;
+
+[Authorize]
+public class ConversationsController : ApiControllerBase
+{
+    private readonly IMessageService _messageService;
+    private readonly IBlobStorageService _blobStorageService;
+
+    public ConversationsController(
+        IMessageService messageService,
+        IBlobStorageService blobStorageService)
+    {
+        _messageService = messageService;
+        _blobStorageService = blobStorageService;
+    }
+
+    /// <summary>
+    /// Get user conversations with pagination
+    /// </summary>
+    [HttpGet]
+    [ProducesResponseType(typeof(PaginatedResponse<ConversationDto>), 200)]
+    public async Task<IActionResult> GetConversations(
+        [FromQuery] PaginationParameters parameters)
+    {
+        var userId = User.GetUserId();
+        var result = await _messageService.GetConversationsAsync(
+            userId, parameters);
+        return ApiResponse(result);
+    }
+
+    /// <summary>
+    /// Get conversation by ID
+    /// </summary>
+    [HttpGet("{id}")]
+    [ProducesResponseType(typeof(ConversationDto), 200)]
+    [ProducesResponseType(404)]
+    public async Task<IActionResult> GetConversation(Guid id)
+    {
+        var userId = User.GetUserId();
+        var result = await _messageService.GetConversationByIdAsync(
+            userId, id);
+        return ApiResponse(result);
+    }
+
+    /// <summary>
+    /// Create new conversation
+    /// </summary>
+    [HttpPost]
+    [ProducesResponseType(typeof(ConversationDto), 201)]
+    public async Task<IActionResult> CreateConversation(
+        [FromBody] CreateConversationRequest request)
+    {
+        var userId = User.GetUserId();
+        var result = await _messageService.CreateConversationAsync(
+            userId, request);
+        
+        if (result.IsSuccess)
+        {
+            return CreatedAtAction(
+                nameof(GetConversation),
+                new { id = result.Value.Id },
+                result.Value);
+        }
+        
+        return ApiResponse(result);
+    }
+
+    /// <summary>
+    /// Get messages in conversation
+    /// </summary>
+    [HttpGet("{id}/messages")]
+    [ProducesResponseType(typeof(PaginatedResponse<MessageDto>), 200)]
+    public async Task<IActionResult> GetMessages(
+        Guid id,
+        [FromQuery] PaginationParameters parameters)
+    {
+        var userId = User.GetUserId();
+        var result = await _messageService.GetConversationMessagesAsync(
+            userId, id, parameters);
+        return ApiResponse(result);
+    }
+
+    /// <summary>
+    /// Send message with optional file attachment
+    /// </summary>
+    [HttpPost("{id}/messages")]
+    [ProducesResponseType(typeof(MessageDto), 201)]
+    [Consumes("multipart/form-data")]
+    public async Task<IActionResult> SendMessage(
+        Guid id,
+        [FromForm] SendMessageRequest request)
+    {
+        var userId = User.GetUserId();
+        
+        // Handle file upload if present
+        string? fileUrl = null;
+        if (request.File != null)
+        {
+            var uploadResult = await _blobStorageService.UploadFileAsync(
+                request.File,
+                $"messages/{id}",
+                userId);
+            
+            if (!uploadResult.IsSuccess)
+                return ApiResponse(uploadResult);
+            
+            fileUrl = uploadResult.Value.Url;
+        }
+
+        var result = await _messageService.SendMessageAsync(
+            userId, id, request.Content, fileUrl);
+        
+        if (result.IsSuccess)
+        {
+            return CreatedAtAction(
+                nameof(GetMessage),
+                new { conversationId = id, messageId = result.Value.Id },
+                result.Value);
+        }
+        
+        return ApiResponse(result);
+    }
+
+    /// <summary>
+    /// Get message by ID
+    /// </summary>
+    [HttpGet("{conversationId}/messages/{messageId}")]
+    [ProducesResponseType(typeof(MessageDto), 200)]
+    [ProducesResponseType(404)]
+    public async Task<IActionResult> GetMessage(
+        Guid conversationId,
+        Guid messageId)
+    {
+        var userId = User.GetUserId();
+        var result = await _messageService.GetMessageByIdAsync(
+            userId, conversationId, messageId);
+        return ApiResponse(result);
+    }
+
+    /// <summary>
+    /// Mark conversation as read
+    /// </summary>
+    [HttpPatch("{id}/read")]
+    [ProducesResponseType(204)]
+    public async Task<IActionResult> MarkAsRead(Guid id)
+    {
+        var userId = User.GetUserId();
+        await _messageService.MarkConversationAsReadAsync(userId, id);
+        return NoContent();
+    }
+}
+```
+
+---
+
+### 7.7. PreferencesController Implementation
+
+```csharp
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using Listo.Notification.Application.Services.Interfaces;
+using Listo.Notification.API.Models.Requests;
+
+namespace Listo.Notification.API.Controllers;
+
+[Authorize]
+public class PreferencesController : ApiControllerBase
+{
+    private readonly IPreferencesService _preferencesService;
+
+    public PreferencesController(IPreferencesService preferencesService)
+    {
+        _preferencesService = preferencesService;
+    }
+
+    /// <summary>
+    /// Get user notification preferences
+    /// </summary>
+    [HttpGet]
+    [ProducesResponseType(typeof(UserPreferencesDto), 200)]
+    public async Task<IActionResult> GetPreferences()
+    {
+        var userId = User.GetUserId();
+        var result = await _preferencesService.GetPreferencesAsync(userId);
+        return ApiResponse(result);
+    }
+
+    /// <summary>
+    /// Update notification preferences
+    /// </summary>
+    [HttpPut]
+    [ProducesResponseType(typeof(UserPreferencesDto), 200)]
+    public async Task<IActionResult> UpdatePreferences(
+        [FromBody] UpdatePreferencesRequest request)
+    {
+        var userId = User.GetUserId();
+        var result = await _preferencesService.UpdatePreferencesAsync(
+            userId, request);
+        return ApiResponse(result);
+    }
+
+    /// <summary>
+    /// Update channel preference (enable/disable specific channel)
+    /// </summary>
+    [HttpPatch("channels/{channel}")]
+    [ProducesResponseType(204)]
+    public async Task<IActionResult> UpdateChannelPreference(
+        string channel,
+        [FromBody] UpdateChannelPreferenceRequest request)
+    {
+        var userId = User.GetUserId();
+        var result = await _preferencesService.UpdateChannelPreferenceAsync(
+            userId, channel, request.Enabled);
+        
+        if (result.IsSuccess)
+            return NoContent();
+        
+        return ApiResponse(result);
+    }
+}
+```
+
+---
+
+### 7.8. AnalyticsController Implementation
+
+```csharp
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using Listo.Notification.Application.Services.Interfaces;
+using Listo.Notification.API.Models.Requests;
+
+namespace Listo.Notification.API.Controllers;
+
+[Authorize(Roles = "Admin")]
+public class AnalyticsController : ApiControllerBase
+{
+    private readonly IAnalyticsService _analyticsService;
+
+    public AnalyticsController(IAnalyticsService analyticsService)
+    {
+        _analyticsService = analyticsService;
+    }
+
+    /// <summary>
+    /// Get notification delivery metrics
+    /// </summary>
+    [HttpGet("metrics")]
+    [ProducesResponseType(typeof(NotificationMetricsDto), 200)]
+    public async Task<IActionResult> GetMetrics(
+        [FromQuery] MetricsQueryParameters parameters)
+    {
+        var result = await _analyticsService.GetMetricsAsync(parameters);
+        return ApiResponse(result);
+    }
+
+    /// <summary>
+    /// Get delivery statistics by channel
+    /// </summary>
+    [HttpGet("stats/channels")]
+    [ProducesResponseType(typeof(ChannelStatsDto), 200)]
+    public async Task<IActionResult> GetChannelStats(
+        [FromQuery] DateRangeParameters parameters)
+    {
+        var result = await _analyticsService.GetChannelStatsAsync(parameters);
+        return ApiResponse(result);
+    }
+
+    /// <summary>
+    /// Get user engagement metrics
+    /// </summary>
+    [HttpGet("engagement")]
+    [ProducesResponseType(typeof(EngagementMetricsDto), 200)]
+    public async Task<IActionResult> GetEngagementMetrics(
+        [FromQuery] DateRangeParameters parameters)
+    {
+        var result = await _analyticsService
+            .GetEngagementMetricsAsync(parameters);
+        return ApiResponse(result);
+    }
+}
+```
+
+---
+
+### 7.9. HealthController Implementation
+
+```csharp
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
+
+namespace Listo.Notification.API.Controllers;
+
+[Route("api/v1/[controller]")]
+public class HealthController : ControllerBase
+{
+    private readonly HealthCheckService _healthCheckService;
+
+    public HealthController(HealthCheckService healthCheckService)
+    {
+        _healthCheckService = healthCheckService;
+    }
+
+    /// <summary>
+    /// Basic health check endpoint
+    /// </summary>
+    [HttpGet]
+    [ProducesResponseType(200)]
+    [ProducesResponseType(503)]
+    public IActionResult Get()
+    {
+        return Ok(new
+        {
+            status = "healthy",
+            timestamp = DateTime.UtcNow
+        });
+    }
+
+    /// <summary>
+    /// Detailed health check with dependency status
+    /// </summary>
+    [HttpGet("detailed")]
+    [ProducesResponseType(typeof(HealthReport), 200)]
+    [ProducesResponseType(503)]
+    public async Task<IActionResult> GetDetailed()
+    {
+        var report = await _healthCheckService.CheckHealthAsync();
+        
+        var response = new
+        {
+            status = report.Status.ToString(),
+            totalDuration = report.TotalDuration.TotalMilliseconds,
+            checks = report.Entries.Select(e => new
+            {
+                name = e.Key,
+                status = e.Value.Status.ToString(),
+                duration = e.Value.Duration.TotalMilliseconds,
+                description = e.Value.Description,
+                data = e.Value.Data
+            })
+        };
+
+        return report.Status == HealthStatus.Healthy
+            ? Ok(response)
+            : StatusCode(503, response);
+    }
+}
+```
+
+---
+
+### 7.10. Application Layer Service Example
+
+```csharp
+using Listo.Notification.Application.Services.Interfaces;
+using Listo.Notification.Domain.Entities;
+using Listo.Notification.Infrastructure.Data;
+using Microsoft.EntityFrameworkCore;
+
+namespace Listo.Notification.Application.Services;
+
+public class NotificationService : INotificationService
+{
+    private readonly NotificationDbContext _context;
+    private readonly IFcmPushProvider _fcmProvider;
+    private readonly ISignalRProvider _signalRProvider;
+    private readonly ITemplateService _templateService;
+    private readonly ILogger<NotificationService> _logger;
+
+    public NotificationService(
+        NotificationDbContext context,
+        IFcmPushProvider fcmProvider,
+        ISignalRProvider signalRProvider,
+        ITemplateService templateService,
+        ILogger<NotificationService> logger)
+    {
+        _context = context;
+        _fcmProvider = fcmProvider;
+        _signalRProvider = signalRProvider;
+        _templateService = templateService;
+        _logger = logger;
+    }
+
+    public async Task<Result<PaginatedResponse<NotificationDto>>> 
+        GetUserNotificationsAsync(
+            Guid userId,
+            NotificationQueryParameters parameters)
+    {
+        var query = _context.Notifications
+            .AsNoTracking()
+            .Where(n => n.UserId == userId);
+
+        // Apply filters
+        if (parameters.IsRead.HasValue)
+            query = query.Where(n => n.IsRead == parameters.IsRead.Value);
+
+        if (parameters.Priority.HasValue)
+            query = query.Where(n => n.Priority == parameters.Priority.Value);
+
+        if (parameters.Channel != null)
+            query = query.Where(n => n.Channel == parameters.Channel);
+
+        // Total count before pagination
+        var totalCount = await query.CountAsync();
+
+        // Apply sorting
+        query = parameters.SortBy?.ToLower() switch
+        {
+            "createdat" => parameters.IsDescending
+                ? query.OrderByDescending(n => n.CreatedAt)
+                : query.OrderBy(n => n.CreatedAt),
+            "priority" => parameters.IsDescending
+                ? query.OrderByDescending(n => n.Priority)
+                : query.OrderBy(n => n.Priority),
+            _ => query.OrderByDescending(n => n.CreatedAt)
+        };
+
+        // Apply pagination
+        var notifications = await query
+            .Skip((parameters.Page - 1) * parameters.PageSize)
+            .Take(parameters.PageSize)
+            .Select(n => new NotificationDto
+            {
+                Id = n.Id,
+                UserId = n.UserId,
+                Title = n.Title,
+                Body = n.Body,
+                Channel = n.Channel,
+                Priority = n.Priority,
+                IsRead = n.IsRead,
+                CreatedAt = n.CreatedAt,
+                ReadAt = n.ReadAt,
+                Data = n.Data
+            })
+            .ToListAsync();
+
+        return Result<PaginatedResponse<NotificationDto>>.Success(
+            new PaginatedResponse<NotificationDto>
+            {
+                Items = notifications,
+                Page = parameters.Page,
+                PageSize = parameters.PageSize,
+                TotalCount = totalCount,
+                TotalPages = (int)Math.Ceiling(totalCount / (double)parameters.PageSize)
+            });
+    }
+
+    public async Task<SynchronousDeliveryResult> 
+        ProcessNotificationSynchronouslyAsync(
+            QueueNotificationRequest request,
+            string correlationId,
+            string idempotencyKey)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        var channelResults = new Dictionary<string, ChannelDeliveryResult>();
+
+        try
+        {
+            // Render template
+            var template = await _templateService
+                .GetTemplateAsync(request.TemplateKey);
+            var renderedContent = _templateService.RenderTemplate(
+                template, request.Data);
+
+            // Create notification record
+            var notification = new Domain.Entities.Notification
+            {
+                Id = Guid.NewGuid(),
+                UserId = request.UserId,
+                Title = renderedContent.Title,
+                Body = renderedContent.Body,
+                Channel = request.Channel,
+                Priority = request.Priority,
+                CorrelationId = correlationId,
+                IdempotencyKey = idempotencyKey,
+                CreatedAt = DateTime.UtcNow
+            };
+
+            await _context.Notifications.AddAsync(notification);
+            await _context.SaveChangesAsync();
+
+            // Send via channels in parallel
+            var tasks = new List<Task<ChannelDeliveryResult>>();
+
+            if (request.Channel == "push")
+            {
+                tasks.Add(SendPushNotificationAsync(
+                    notification, request.EncryptedFirebaseToken));
+            }
+
+            // Always broadcast via SignalR for real-time updates
+            tasks.Add(BroadcastViaSignalRAsync(notification));
+
+            var results = await Task.WhenAll(tasks);
+
+            foreach (var result in results)
+            {
+                channelResults[result.Channel] = result;
+            }
+
+            stopwatch.Stop();
+
+            return new SynchronousDeliveryResult
+            {
+                NotificationId = notification.Id,
+                Status = channelResults.All(r => r.Value.Delivered)
+                    ? "delivered"
+                    : "partial",
+                ChannelResults = channelResults,
+                ProcessingTimeMs = (int)stopwatch.ElapsedMilliseconds
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, 
+                "Error processing synchronous notification. CorrelationId: {CorrelationId}",
+                correlationId);
+            throw;
+        }
+    }
+
+    private async Task<ChannelDeliveryResult> SendPushNotificationAsync(
+        Domain.Entities.Notification notification,
+        string encryptedToken)
+    {
+        try
+        {
+            var result = await _fcmProvider.SendNotificationAsync(
+                encryptedToken,
+                notification.Title,
+                notification.Body,
+                notification.Data);
+
+            return new ChannelDeliveryResult
+            {
+                Channel = "push",
+                Delivered = result.IsSuccess,
+                ProviderMessageId = result.MessageId,
+                DeliveredAt = DateTime.UtcNow
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "FCM push notification failed");
+            return new ChannelDeliveryResult
+            {
+                Channel = "push",
+                Delivered = false,
+                Error = ex.Message
+            };
+        }
+    }
+
+    private async Task<ChannelDeliveryResult> BroadcastViaSignalRAsync(
+        Domain.Entities.Notification notification)
+    {
+        try
+        {
+            await _signalRProvider.BroadcastNotificationAsync(
+                notification.UserId.ToString(),
+                notification);
+
+            return new ChannelDeliveryResult
+            {
+                Channel = "signalr",
+                Broadcast = true,
+                DeliveredAt = DateTime.UtcNow
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "SignalR broadcast failed");
+            return new ChannelDeliveryResult
+            {
+                Channel = "signalr",
+                Broadcast = false,
+                Error = ex.Message
+            };
+        }
+    }
+}
+```
+
+---
+
+### 7.11. Middleware Implementation
+
+#### ExceptionHandlingMiddleware
+
+```csharp
+using System.Net;
+using System.Text.Json;
+using Listo.Notification.API.Models.Responses;
+
+namespace Listo.Notification.API.Middleware;
+
+public class ExceptionHandlingMiddleware
+{
+    private readonly RequestDelegate _next;
+    private readonly ILogger<ExceptionHandlingMiddleware> _logger;
+
+    public ExceptionHandlingMiddleware(
+        RequestDelegate next,
+        ILogger<ExceptionHandlingMiddleware> logger)
+    {
+        _next = next;
+        _logger = logger;
+    }
+
+    public async Task InvokeAsync(HttpContext context)
+    {
+        try
+        {
+            await _next(context);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, 
+                "Unhandled exception occurred. Path: {Path}",
+                context.Request.Path);
+            await HandleExceptionAsync(context, ex);
+        }
+    }
+
+    private static Task HandleExceptionAsync(
+        HttpContext context,
+        Exception exception)
+    {
+        var statusCode = exception switch
+        {
+            UnauthorizedAccessException => HttpStatusCode.Unauthorized,
+            ArgumentException => HttpStatusCode.BadRequest,
+            KeyNotFoundException => HttpStatusCode.NotFound,
+            _ => HttpStatusCode.InternalServerError
+        };
+
+        var response = new ApiErrorResponse
+        {
+            Success = false,
+            Error = statusCode.ToString(),
+            Message = exception.Message,
+            TraceId = context.TraceIdentifier
+        };
+
+        context.Response.ContentType = "application/json";
+        context.Response.StatusCode = (int)statusCode;
+
+        var json = JsonSerializer.Serialize(response);
+        return context.Response.WriteAsync(json);
+    }
+}
+```
+
+#### ServiceAuthenticationMiddleware
+
+```csharp
+using Microsoft.Extensions.Options;
+
+namespace Listo.Notification.API.Middleware;
+
+public class ServiceAuthenticationMiddleware
+{
+    private readonly RequestDelegate _next;
+    private readonly ILogger<ServiceAuthenticationMiddleware> _logger;
+    private readonly ServiceSecretsConfig _config;
+
+    public ServiceAuthenticationMiddleware(
+        RequestDelegate next,
+        ILogger<ServiceAuthenticationMiddleware> logger,
+        IOptions<ServiceSecretsConfig> config)
+    {
+        _next = next;
+        _logger = logger;
+        _config = config.Value;
+    }
+
+    public async Task InvokeAsync(HttpContext context)
+    {
+        // Only apply to /api/v1/internal/* routes
+        if (context.Request.Path.StartsWithSegments("/api/v1/internal"))
+        {
+            if (!context.Request.Headers
+                .TryGetValue("X-Service-Secret", out var serviceSecret))
+            {
+                context.Response.StatusCode = 401;
+                await context.Response.WriteAsync(
+                    "Missing X-Service-Secret header");
+                return;
+            }
+
+            var serviceOrigin = context.Request.Headers["X-Service-Origin"]
+                .ToString();
+
+            if (!ValidateServiceSecret(serviceOrigin, serviceSecret!))
+            {
+                _logger.LogWarning(
+                    "Invalid service secret for origin: {Origin}",
+                    serviceOrigin);
+                context.Response.StatusCode = 401;
+                await context.Response.WriteAsync("Invalid service secret");
+                return;
+            }
+        }
+
+        await _next(context);
+    }
+
+    private bool ValidateServiceSecret(string origin, string secret)
+    {
+        return origin?.ToLower() switch
+        {
+            "auth" => secret == _config.AuthServiceSecret,
+            "orders" => secret == _config.OrdersServiceSecret,
+            "ridesharing" => secret == _config.RideSharingServiceSecret,
+            _ => false
+        };
+    }
+}
+```
+
+---
+
+### 7.12. Program.cs Configuration
+
+```csharp
+using Listo.Notification.API.Extensions;
+using Listo.Notification.API.Middleware;
+using Listo.Notification.Infrastructure.Data;
+using Microsoft.EntityFrameworkCore;
+using Serilog;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Configure Serilog
+builder.Host.UseSerilog((context, config) =>
+    config.ReadFrom.Configuration(context.Configuration));
+
+// Add services
+builder.Services.AddControllers();
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
+
+// Database
+builder.Services.AddDbContext<NotificationDbContext>(options =>
+    options.UseSqlServer(
+        builder.Configuration.GetConnectionString("DefaultConnection")));
+
+// Authentication & Authorization
+builder.Services.AddAuthentication()
+    .AddJwtBearer(options =>
+    {
+        options.Authority = builder.Configuration["Auth:Authority"];
+        options.Audience = builder.Configuration["Auth:Audience"];
+    });
+
+builder.Services.AddAuthorization();
+
+// Application services
+builder.Services.AddApplicationServices();
+builder.Services.AddInfrastructureServices(builder.Configuration);
+
+// Health checks
+builder.Services.AddHealthChecks()
+    .AddDbContextCheck<NotificationDbContext>()
+    .AddAzureServiceBusQueue(
+        builder.Configuration["ServiceBus:ConnectionString"],
+        builder.Configuration["ServiceBus:QueueName"])
+    .AddAzureBlobStorage(
+        builder.Configuration["BlobStorage:ConnectionString"]);
+
+// CORS
+builder.Services.AddCors(options =>
+{
+    options.AddDefaultPolicy(policy =>
+    {
+        policy.WithOrigins(
+                builder.Configuration.GetSection("Cors:AllowedOrigins")
+                    .Get<string[]>()!)
+            .AllowAnyMethod()
+            .AllowAnyHeader()
+            .AllowCredentials();
+    });
+});
+
+var app = builder.Build();
+
+// Middleware pipeline
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI();
+}
+
+app.UseMiddleware<ExceptionHandlingMiddleware>();
+app.UseMiddleware<ServiceAuthenticationMiddleware>();
+
+app.UseHttpsRedirection();
+app.UseCors();
+app.UseAuthentication();
+app.UseAuthorization();
+
+app.MapControllers();
+app.MapHealthChecks("/health");
+app.MapHealthChecks("/health/detailed");
+
+app.Run();
+```
+
+---
+
+### 7.13. API Response Models
+
+```csharp
+namespace Listo.Notification.API.Models.Responses;
+
+public class ApiSuccessResponse<T>
+{
+    public bool Success { get; set; } = true;
+    public T? Data { get; set; }
+    public string? Message { get; set; }
+}
+
+public class ApiSuccessResponse
+{
+    public bool Success { get; set; } = true;
+    public string? Message { get; set; }
+}
+
+public class ApiErrorResponse
+{
+    public bool Success { get; set; } = false;
+    public string Error { get; set; } = null!;
+    public string Message { get; set; } = null!;
+    public Dictionary<string, string[]>? ValidationErrors { get; set; }
+    public string? TraceId { get; set; }
+}
+
+public class PaginatedResponse<T>
+{
+    public List<T> Items { get; set; } = new();
+    public int Page { get; set; }
+    public int PageSize { get; set; }
+    public int TotalCount { get; set; }
+    public int TotalPages { get; set; }
+    public bool HasPrevious => Page > 1;
+    public bool HasNext => Page < TotalPages;
+}
+```
+
+---
+
+## 8. Validation & Error Handling
 
 - **Request Validation:** Use DataAnnotations and/or FluentValidation.
 - **Error Handling:** Implement global exception middleware for consistent error responses.
