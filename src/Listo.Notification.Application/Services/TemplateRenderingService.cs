@@ -1,7 +1,6 @@
 using Listo.Notification.Application.DTOs;
 using Listo.Notification.Application.Interfaces;
 using Listo.Notification.Domain.Entities;
-using Listo.Notification.Domain.Repositories;
 using Microsoft.Extensions.Logging;
 using Scriban;
 using Scriban.Runtime;
@@ -242,13 +241,13 @@ public class TemplateRenderingService : ITemplateRenderingService
 
         var template = new TemplateEntity
         {
-            Id = Guid.NewGuid(),
-            TenantId = tenantId,
+            TemplateId = Guid.NewGuid(),
             TemplateKey = request.TemplateKey,
             Channel = request.Channel,
-            SubjectTemplate = request.SubjectTemplate,
-            BodyTemplate = request.BodyTemplate,
-            Description = request.Description,
+            Subject = request.SubjectTemplate,
+            Body = request.BodyTemplate,
+            Locale = "en-US",
+            Version = 1,
             IsActive = request.IsActive,
             CreatedAt = DateTime.UtcNow,
             UpdatedAt = DateTime.UtcNow
@@ -275,7 +274,7 @@ public class TemplateRenderingService : ITemplateRenderingService
             {
                 throw new InvalidOperationException($"Invalid subject template: {subjectError}");
             }
-            template.SubjectTemplate = request.SubjectTemplate;
+            template.Subject = request.SubjectTemplate;
         }
 
         if (request.BodyTemplate != null)
@@ -284,11 +283,8 @@ public class TemplateRenderingService : ITemplateRenderingService
             {
                 throw new InvalidOperationException($"Invalid body template: {bodyError}");
             }
-            template.BodyTemplate = request.BodyTemplate;
+            template.Body = request.BodyTemplate;
         }
-
-        if (request.Description != null)
-            template.Description = request.Description;
 
         if (request.IsActive.HasValue)
             template.IsActive = request.IsActive.Value;
@@ -332,26 +328,27 @@ public class TemplateRenderingService : ITemplateRenderingService
             throw new InvalidOperationException($"Template '{templateKey}' is inactive");
         }
 
-        var renderedSubject = await RenderWithCachingAsync(
-            $"{templateKey}_subject",
-            template.SubjectTemplate,
-            variables,
-            cancellationToken);
+        var renderedSubject = string.Empty;
+        if (!string.IsNullOrWhiteSpace(template.Subject))
+        {
+            renderedSubject = await RenderWithCachingAsync(
+                $"{templateKey}_subject",
+                template.Subject,
+                variables,
+                cancellationToken);
+        }
 
         var renderedBody = await RenderWithCachingAsync(
             $"{templateKey}_body",
-            template.BodyTemplate,
+            template.Body,
             variables,
             cancellationToken);
 
         return new RenderTemplateResponse
         {
-            TemplateKey = templateKey,
-            RenderedSubject = renderedSubject,
-            RenderedBody = renderedBody,
-            Variables = variables,
-            Locale = locale,
-            RenderedAt = DateTime.UtcNow
+            Subject = renderedSubject,
+            Body = renderedBody,
+            Locale = locale
         };
     }
 
@@ -359,13 +356,13 @@ public class TemplateRenderingService : ITemplateRenderingService
     {
         return new TemplateResponse
         {
-            Id = entity.Id,
-            TenantId = entity.TenantId,
+            Id = entity.TemplateId,
+            Name = entity.TemplateKey,
             TemplateKey = entity.TemplateKey,
             Channel = entity.Channel,
-            SubjectTemplate = entity.SubjectTemplate,
-            BodyTemplate = entity.BodyTemplate,
-            Description = entity.Description,
+            Locale = entity.Locale,
+            SubjectTemplate = entity.Subject ?? string.Empty,
+            BodyTemplate = entity.Body,
             IsActive = entity.IsActive,
             CreatedAt = entity.CreatedAt,
             UpdatedAt = entity.UpdatedAt

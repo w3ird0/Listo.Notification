@@ -202,7 +202,7 @@ public class NotificationService : INotificationService
                     Subject = item.TemplateKey,
                     Body = $"Template: {item.TemplateKey}",
                     Priority = item.Priority,
-                    ServiceOrigin = ServiceOrigin.Internal
+                    ServiceOrigin = ServiceOrigin.System
                 };
 
                 var response = await SendNotificationAsync(tenantId, userId, notification, cancellationToken);
@@ -261,7 +261,7 @@ public class NotificationService : INotificationService
                     Subject = item.TemplateKey,
                     Body = $"Template: {item.TemplateKey}",
                     Priority = item.Priority,
-                    ServiceOrigin = ServiceOrigin.Internal,
+                    ServiceOrigin = ServiceOrigin.System,
                     ScheduledFor = item.ScheduledFor
                 };
 
@@ -324,7 +324,7 @@ public class NotificationService : INotificationService
         if (notification == null || notification.UserId != userId)
             return null;
 
-        notification.Status = NotificationStatus.Cancelled;
+        notification.Status = NotificationStatus.Failed;
         notification.ErrorMessage = cancellationReason;
         notification.UpdatedAt = DateTime.UtcNow;
 

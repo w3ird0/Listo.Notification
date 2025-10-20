@@ -100,7 +100,7 @@ public class AdminController : ControllerBase
     {
         _logger.LogInformation(
             "Admin updating budget: TenantId={TenantId}, MonthlyBudget={MonthlyBudget}",
-            request.TenantId, request.MonthlyBudget);
+            request.TenantId, request.MonthlyBudgetUsd);
 
         await _notificationService.UpdateBudgetAsync(request, cancellationToken);
         return Ok(new { message = "Budget updated successfully" });

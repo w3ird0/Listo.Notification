@@ -1,3 +1,4 @@
+using Listo.Notification.Application.DTOs;
 using Listo.Notification.Application.Interfaces;
 using Listo.Notification.Domain.Entities;
 using Listo.Notification.Infrastructure.Data;
@@ -211,6 +212,90 @@ public class RedisTokenBucketLimiter : IRateLimiterService
         var allowed = (int)values[0];
 
         return allowed == 1;
+    }
+
+    // Admin Operations
+    public async Task<object> GetRateLimitConfigAsync(
+        string tenantId,
+        string? userId,
+        string? channel,
+        CancellationToken cancellationToken = default)
+    {
+        var tenantGuid = Guid.TryParse(tenantId, out var guid) ? guid : (Guid?)null;
+        
+        var query = _dbContext.RateLimiting.AsQueryable();
+        
+        if (tenantGuid.HasValue)
+            query = query.Where(r => r.TenantId == tenantGuid.Value);
+            
+        if (!string.IsNullOrWhiteSpace(channel))
+            query = query.Where(r => r.Channel == channel);
+        
+        var configs = await query.ToListAsync(cancellationToken);
+        
+        return new 
+        {
+            tenantId,
+            channel,
+            configs = configs.Select(c => new
+            {
+                c.ConfigId,
+                c.TenantId,
+                c.ServiceOrigin,
+                c.Channel,
+                c.PerUserMax,
+                c.PerUserWindowSeconds,
+                c.PerServiceMax,
+                c.PerServiceWindowSeconds,
+                c.Enabled
+            })
+        };
+    }
+
+    public async Task UpdateRateLimitConfigAsync(
+        UpdateRateLimitRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        var tenantGuid = Guid.TryParse(request.TenantId, out var guid) ? guid : (Guid?)null;
+        
+        // Find existing config or create new one
+        var config = await _dbContext.RateLimiting
+            .Where(r => r.TenantId == tenantGuid && r.Channel == request.Channel)
+            .FirstOrDefaultAsync(cancellationToken);
+        
+        if (config == null)
+        {
+            config = new RateLimitingEntity
+            {
+                ConfigId = Guid.NewGuid(),
+                TenantId = tenantGuid,
+                Channel = request.Channel ?? "*",
+                ServiceOrigin = "*",
+                PerUserMax = request.Limit,
+                PerUserWindowSeconds = request.WindowSeconds,
+                PerUserMaxCap = request.BurstCapacity ?? request.Limit * 2,
+                PerServiceMax = request.Limit * 10,
+                PerServiceWindowSeconds = request.WindowSeconds,
+                PerServiceMaxCap = request.Limit * 20,
+                BurstSize = request.BurstCapacity ?? request.Limit,
+                Enabled = true
+            };
+            
+            _dbContext.RateLimiting.Add(config);
+        }
+        else
+        {
+            config.PerUserMax = request.Limit;
+            config.PerUserWindowSeconds = request.WindowSeconds;
+            config.PerUserMaxCap = request.BurstCapacity ?? request.Limit * 2;
+            config.BurstSize = request.BurstCapacity ?? request.Limit;
+        }
+        
+        await _dbContext.SaveChangesAsync(cancellationToken);
+        
+        _logger.LogInformation(
+            "Updated rate limit config for tenant {TenantId}, channel {Channel}",
+            request.TenantId, request.Channel);
     }
 
     private async Task<RateLimitingEntity?> GetRateLimitConfigAsync(
