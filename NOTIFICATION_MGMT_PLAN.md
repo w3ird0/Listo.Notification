@@ -1271,6 +1271,632 @@ app.Use(async (context, next) =>
 
 ---
 
+## 6. Service-Specific Event Mappings
+
+This section defines the canonical events published by each Listo service and how they map to notification templates and delivery channels.
+
+### 6.1. Listo.Auth Service Events
+
+#### 6.1.1. EmailVerificationRequested
+
+**Channels:** Email  
+**Template Key:** `email_verification_requested`  
+**Priority:** High  
+**Delivery:** Asynchronous  
+**Timeout:** 30 seconds
+
+**Event Payload:**
+```json
+{
+  "eventId": "evt-auth-001",
+  "occurredAt": "2024-01-15T10:30:00Z",
+  "messageType": "EmailVerificationRequested",
+  "serviceOrigin": "auth",
+  "userId": "user-uuid-123",
+  "correlationId": "trace-abc-123",
+  "idempotencyKey": "auth-email-verify-user-uuid-123",
+  "priority": "high",
+  "channels": ["email"],
+  "templateKey": "email_verification_requested",
+  "data": {
+    "email": "user@example.com",
+    "verificationCode": "ABC123XYZ",
+    "verificationLink": "https://app.listoexpress.com/verify?token=xyz",
+    "expiryMinutes": 60,
+    "userName": "John Doe"
+  },
+  "metadata": {
+    "locale": "en-US",
+    "timezone": "America/New_York"
+  }
+}
+```
+
+**Template Variables:** `email`, `verificationCode`, `verificationLink`, `expiryMinutes`, `userName`
+
+**Required Headers:**
+- `X-Service-Secret`
+- `X-Correlation-Id`
+- `X-Idempotency-Key`
+
+---
+
+#### 6.1.2. MobileVerificationRequested
+
+**Channels:** SMS  
+**Template Key:** `mobile_verification_requested`  
+**Priority:** High  
+**Delivery:** Asynchronous  
+**Timeout:** 20 seconds
+
+**Event Payload:**
+```json
+{
+  "eventId": "evt-auth-002",
+  "occurredAt": "2024-01-15T10:30:00Z",
+  "messageType": "MobileVerificationRequested",
+  "serviceOrigin": "auth",
+  "userId": "user-uuid-123",
+  "correlationId": "trace-abc-124",
+  "idempotencyKey": "auth-mobile-verify-user-uuid-123",
+  "priority": "high",
+  "channels": ["sms"],
+  "templateKey": "mobile_verification_requested",
+  "data": {
+    "phoneNumber": "+1234567890",
+    "otpCode": "123456",
+    "expiryMinutes": 10,
+    "appName": "ListoExpress"
+  }
+}
+```
+
+**Template Variables:** `phoneNumber`, `otpCode`, `expiryMinutes`, `appName`
+
+---
+
+#### 6.1.3. PasswordResetRequested
+
+**Channels:** Email, SMS  
+**Template Key:** `password_reset_requested`  
+**Priority:** High  
+**Delivery:** Asynchronous  
+**Timeout:** 30 seconds
+
+**Event Payload:**
+```json
+{
+  "eventId": "evt-auth-003",
+  "occurredAt": "2024-01-15T10:30:00Z",
+  "messageType": "PasswordResetRequested",
+  "serviceOrigin": "auth",
+  "userId": "user-uuid-123",
+  "correlationId": "trace-abc-125",
+  "idempotencyKey": "auth-password-reset-user-uuid-123",
+  "priority": "high",
+  "channels": ["email", "sms"],
+  "templateKey": "password_reset_requested",
+  "data": {
+    "email": "user@example.com",
+    "phoneNumber": "+1234567890",
+    "resetCode": "789456",
+    "resetLink": "https://app.listoexpress.com/reset-password?token=xyz",
+    "expiryMinutes": 15,
+    "userName": "John Doe",
+    "ipAddress": "192.168.1.1"
+  }
+}
+```
+
+**Template Variables:** `email`, `phoneNumber`, `resetCode`, `resetLink`, `expiryMinutes`, `userName`, `ipAddress`
+
+---
+
+#### 6.1.4. TwoFactorCodeIssued
+
+**Channels:** SMS, Email  
+**Template Key:** `two_factor_code_issued`  
+**Priority:** High  
+**Delivery:** Asynchronous  
+**Timeout:** 20 seconds
+
+**Event Payload:**
+```json
+{
+  "eventId": "evt-auth-004",
+  "occurredAt": "2024-01-15T10:30:00Z",
+  "messageType": "TwoFactorCodeIssued",
+  "serviceOrigin": "auth",
+  "userId": "user-uuid-123",
+  "correlationId": "trace-abc-126",
+  "idempotencyKey": "auth-2fa-code-user-uuid-123",
+  "priority": "high",
+  "channels": ["sms", "email"],
+  "templateKey": "two_factor_code_issued",
+  "data": {
+    "twoFactorCode": "654321",
+    "expiryMinutes": 5,
+    "deviceInfo": "Chrome on Windows",
+    "ipAddress": "192.168.1.1"
+  }
+}
+```
+
+**Template Variables:** `twoFactorCode`, `expiryMinutes`, `deviceInfo`, `ipAddress`
+
+---
+
+#### 6.1.5. SuspiciousLoginDetected
+
+**Channels:** Email, Push  
+**Template Key:** `suspicious_login_detected`  
+**Priority:** High  
+**Delivery:** Asynchronous  
+**Timeout:** 30 seconds
+
+**Event Payload:**
+```json
+{
+  "eventId": "evt-auth-005",
+  "occurredAt": "2024-01-15T10:30:00Z",
+  "messageType": "SuspiciousLoginDetected",
+  "serviceOrigin": "auth",
+  "userId": "user-uuid-123",
+  "correlationId": "trace-abc-127",
+  "idempotencyKey": "auth-suspicious-login-user-uuid-123-1705315800",
+  "priority": "high",
+  "channels": ["email", "push"],
+  "templateKey": "suspicious_login_detected",
+  "data": {
+    "userName": "John Doe",
+    "loginTime": "2024-01-15T10:30:00Z",
+    "deviceInfo": "Unknown Device - Chrome on Linux",
+    "ipAddress": "203.0.113.42",
+    "location": "Unknown Location",
+    "actionLink": "https://app.listoexpress.com/security/review"
+  }
+}
+```
+
+**Template Variables:** `userName`, `loginTime`, `deviceInfo`, `ipAddress`, `location`, `actionLink`
+
+---
+
+### 6.2. Listo.Orders Service Events
+
+#### 6.2.1. OrderConfirmed
+
+**Channels:** Email, Push  
+**Template Key:** `order_confirmed`  
+**Priority:** Normal  
+**Delivery:** Asynchronous  
+**Timeout:** 30 seconds
+
+**Event Payload:**
+```json
+{
+  "eventId": "evt-orders-001",
+  "occurredAt": "2024-01-15T10:30:00Z",
+  "messageType": "OrderConfirmed",
+  "serviceOrigin": "orders",
+  "userId": "customer-uuid-456",
+  "correlationId": "trace-order-001",
+  "idempotencyKey": "orders-confirmed-ORD-001",
+  "priority": "normal",
+  "channels": ["email", "push"],
+  "templateKey": "order_confirmed",
+  "data": {
+    "orderId": "ORD-001",
+    "orderNumber": "ORD-20240115-001",
+    "customerName": "Jane Smith",
+    "merchantName": "Pizza Palace",
+    "totalAmount": "$28.98",
+    "estimatedDeliveryTime": "6:30 PM",
+    "deliveryAddress": "123 Main St, Apt 4B",
+    "orderDetailsLink": "https://app.listoexpress.com/orders/ORD-001"
+  }
+}
+```
+
+**Template Variables:** `orderId`, `orderNumber`, `customerName`, `merchantName`, `totalAmount`, `estimatedDeliveryTime`, `deliveryAddress`, `orderDetailsLink`
+
+---
+
+#### 6.2.2. OrderStatusUpdated
+
+**Channels:** Push, SMS (optional)  
+**Template Key:** `order_status_updated`  
+**Priority:** Normal  
+**Delivery:** Asynchronous  
+**Timeout:** 30 seconds
+
+**Event Payload:**
+```json
+{
+  "eventId": "evt-orders-002",
+  "occurredAt": "2024-01-15T10:45:00Z",
+  "messageType": "OrderStatusUpdated",
+  "serviceOrigin": "orders",
+  "userId": "customer-uuid-456",
+  "correlationId": "trace-order-001",
+  "idempotencyKey": "orders-status-ORD-001-preparing",
+  "priority": "normal",
+  "channels": ["push"],
+  "templateKey": "order_status_updated",
+  "data": {
+    "orderId": "ORD-001",
+    "orderNumber": "ORD-20240115-001",
+    "previousStatus": "accepted",
+    "newStatus": "preparing",
+    "statusMessage": "Your order is being prepared",
+    "estimatedDeliveryTime": "6:30 PM"
+  }
+}
+```
+
+**Template Variables:** `orderId`, `orderNumber`, `previousStatus`, `newStatus`, `statusMessage`, `estimatedDeliveryTime`
+
+---
+
+#### 6.2.3. DriverAssigned (SYNCHRONOUS)
+
+**Channels:** Push  
+**Template Key:** `driver_assigned`  
+**Priority:** High  
+**Delivery:** **SYNCHRONOUS** (< 2 seconds)  
+**Timeout:** 15 seconds
+
+**⚠️ CRITICAL PATH:** This event MUST be delivered synchronously via direct REST API call with `synchronous: true`
+
+**Event Payload:**
+```json
+{
+  "eventId": "evt-orders-003",
+  "occurredAt": "2024-01-15T10:50:00Z",
+  "messageType": "DriverAssigned",
+  "serviceOrigin": "orders",
+  "userId": "driver-uuid-789",
+  "correlationId": "trace-order-001",
+  "idempotencyKey": "orders-driver-assigned-ORD-001-driver-789",
+  "priority": "high",
+  "channels": ["push"],
+  "templateKey": "driver_assigned",
+  "synchronous": true,
+  "data": {
+    "orderId": "ORD-001",
+    "orderNumber": "ORD-20240115-001",
+    "customerName": "Jane Smith",
+    "pickupAddress": "Pizza Palace, 456 Business Ave",
+    "deliveryAddress": "123 Main St, Apt 4B",
+    "estimatedPickupTime": "6:15 PM",
+    "estimatedDeliveryTime": "6:30 PM",
+    "orderTotal": "$28.98",
+    "deliveryFee": "$5.99",
+    "orderDetailsLink": "listo://orders/ORD-001"
+  }
+}
+```
+
+**Template Variables:** `orderId`, `orderNumber`, `customerName`, `pickupAddress`, `deliveryAddress`, `estimatedPickupTime`, `estimatedDeliveryTime`, `orderTotal`, `deliveryFee`, `orderDetailsLink`
+
+**Implementation Note:** Must use `POST /api/v1/internal/notifications/queue` with `synchronous: true` flag. API will send FCM push + SignalR broadcast in parallel before returning.
+
+---
+
+#### 6.2.4. DeliveryCompleted
+
+**Channels:** Email, Push  
+**Template Key:** `delivery_completed`  
+**Priority:** Normal  
+**Delivery:** Asynchronous  
+**Timeout:** 30 seconds
+
+**Event Payload:**
+```json
+{
+  "eventId": "evt-orders-004",
+  "occurredAt": "2024-01-15T18:28:00Z",
+  "messageType": "DeliveryCompleted",
+  "serviceOrigin": "orders",
+  "userId": "customer-uuid-456",
+  "correlationId": "trace-order-001",
+  "idempotencyKey": "orders-delivered-ORD-001",
+  "priority": "normal",
+  "channels": ["email", "push"],
+  "templateKey": "delivery_completed",
+  "data": {
+    "orderId": "ORD-001",
+    "orderNumber": "ORD-20240115-001",
+    "deliveredAt": "6:28 PM",
+    "driverName": "Alex Driver",
+    "ratingLink": "https://app.listoexpress.com/orders/ORD-001/rate",
+    "receiptLink": "https://app.listoexpress.com/orders/ORD-001/receipt"
+  }
+}
+```
+
+**Template Variables:** `orderId`, `orderNumber`, `deliveredAt`, `driverName`, `ratingLink`, `receiptLink`
+
+---
+
+### 6.3. Listo.RideSharing Service Events
+
+#### 6.3.1. RideBooked
+
+**Channels:** Push, Email  
+**Template Key:** `ride_booked`  
+**Priority:** Normal  
+**Delivery:** Asynchronous  
+**Timeout:** 30 seconds
+
+**Event Payload:**
+```json
+{
+  "eventId": "evt-ridesharing-001",
+  "occurredAt": "2024-01-15T10:30:00Z",
+  "messageType": "RideBooked",
+  "serviceOrigin": "ridesharing",
+  "userId": "passenger-uuid-111",
+  "correlationId": "trace-ride-001",
+  "idempotencyKey": "ridesharing-booked-RIDE-001",
+  "priority": "normal",
+  "channels": ["push", "email"],
+  "templateKey": "ride_booked",
+  "data": {
+    "rideId": "RIDE-001",
+    "passengerName": "Bob Passenger",
+    "rideType": "Economy",
+    "pickupAddress": "123 Main St",
+    "dropoffAddress": "456 Pine St",
+    "scheduledTime": "3:00 PM",
+    "estimatedFare": "$12.50",
+    "rideDetailsLink": "https://app.listoexpress.com/rides/RIDE-001"
+  }
+}
+```
+
+**Template Variables:** `rideId`, `passengerName`, `rideType`, `pickupAddress`, `dropoffAddress`, `scheduledTime`, `estimatedFare`, `rideDetailsLink`
+
+---
+
+#### 6.3.2. DriverAssigned (SYNCHRONOUS)
+
+**Channels:** Push  
+**Template Key:** `ridesharing_driver_assigned`  
+**Priority:** High  
+**Delivery:** **SYNCHRONOUS** (< 2 seconds)  
+**Timeout:** 15 seconds
+
+**⚠️ CRITICAL PATH:** Must be delivered synchronously to both driver and passenger
+
+**Event Payload (to Driver):**
+```json
+{
+  "eventId": "evt-ridesharing-002",
+  "occurredAt": "2024-01-15T10:32:00Z",
+  "messageType": "DriverAssigned",
+  "serviceOrigin": "ridesharing",
+  "userId": "driver-uuid-222",
+  "correlationId": "trace-ride-001",
+  "idempotencyKey": "ridesharing-driver-assigned-RIDE-001-driver-222",
+  "priority": "high",
+  "channels": ["push"],
+  "templateKey": "ridesharing_driver_assigned",
+  "synchronous": true,
+  "data": {
+    "rideId": "RIDE-001",
+    "passengerName": "Bob Passenger",
+    "passengerRating": "4.8",
+    "pickupAddress": "123 Main St",
+    "dropoffAddress": "456 Pine St",
+    "estimatedPickupTime": "2:45 PM",
+    "estimatedFare": "$12.50",
+    "rideDetailsLink": "listo://rides/RIDE-001"
+  }
+}
+```
+
+**Event Payload (to Passenger):**
+```json
+{
+  "eventId": "evt-ridesharing-003",
+  "occurredAt": "2024-01-15T10:32:00Z",
+  "messageType": "DriverAssignedToPassenger",
+  "serviceOrigin": "ridesharing",
+  "userId": "passenger-uuid-111",
+  "correlationId": "trace-ride-001",
+  "idempotencyKey": "ridesharing-driver-assigned-passenger-RIDE-001",
+  "priority": "high",
+  "channels": ["push"],
+  "templateKey": "driver_assigned_to_passenger",
+  "synchronous": false,
+  "data": {
+    "rideId": "RIDE-001",
+    "driverName": "Alex Driver",
+    "driverRating": "4.9",
+    "vehicleType": "Toyota Prius",
+    "vehicleColor": "Silver",
+    "licensePlate": "ABC123",
+    "estimatedArrival": "5 minutes",
+    "driverPhotoUrl": "https://cdn.listoexpress.com/drivers/222.jpg"
+  }
+}
+```
+
+**Template Variables (Driver):** `rideId`, `passengerName`, `passengerRating`, `pickupAddress`, `dropoffAddress`, `estimatedPickupTime`, `estimatedFare`, `rideDetailsLink`
+
+**Template Variables (Passenger):** `rideId`, `driverName`, `driverRating`, `vehicleType`, `vehicleColor`, `licensePlate`, `estimatedArrival`, `driverPhotoUrl`
+
+---
+
+#### 6.3.3. DriverArriving
+
+**Channels:** Push  
+**Template Key:** `driver_arriving`  
+**Priority:** High  
+**Delivery:** Asynchronous  
+**Timeout:** 20 seconds
+
+**Event Payload:**
+```json
+{
+  "eventId": "evt-ridesharing-004",
+  "occurredAt": "2024-01-15T10:40:00Z",
+  "messageType": "DriverArriving",
+  "serviceOrigin": "ridesharing",
+  "userId": "passenger-uuid-111",
+  "correlationId": "trace-ride-001",
+  "idempotencyKey": "ridesharing-arriving-RIDE-001",
+  "priority": "high",
+  "channels": ["push"],
+  "templateKey": "driver_arriving",
+  "data": {
+    "rideId": "RIDE-001",
+    "driverName": "Alex Driver",
+    "estimatedArrival": "2 minutes",
+    "vehicleType": "Toyota Prius",
+    "licensePlate": "ABC123"
+  }
+}
+```
+
+**Template Variables:** `rideId`, `driverName`, `estimatedArrival`, `vehicleType`, `licensePlate`
+
+---
+
+#### 6.3.4. RideCompleted
+
+**Channels:** Email, Push  
+**Template Key:** `ride_completed`  
+**Priority:** Normal  
+**Delivery:** Asynchronous  
+**Timeout:** 30 seconds
+
+**Event Payload:**
+```json
+{
+  "eventId": "evt-ridesharing-005",
+  "occurredAt": "2024-01-15T11:15:00Z",
+  "messageType": "RideCompleted",
+  "serviceOrigin": "ridesharing",
+  "userId": "passenger-uuid-111",
+  "correlationId": "trace-ride-001",
+  "idempotencyKey": "ridesharing-completed-RIDE-001",
+  "priority": "normal",
+  "channels": ["email", "push"],
+  "templateKey": "ride_completed",
+  "data": {
+    "rideId": "RIDE-001",
+    "completedAt": "11:15 AM",
+    "driverName": "Alex Driver",
+    "finalFare": "$14.00",
+    "distance": "5.2 miles",
+    "duration": "15 minutes",
+    "ratingLink": "https://app.listoexpress.com/rides/RIDE-001/rate",
+    "receiptLink": "https://app.listoexpress.com/rides/RIDE-001/receipt"
+  }
+}
+```
+
+**Template Variables:** `rideId`, `completedAt`, `driverName`, `finalFare`, `distance`, `duration`, `ratingLink`, `receiptLink`
+
+---
+
+### 6.4. Event Publishing Guidelines
+
+#### Service Bus Topic Publishing
+
+**Topic:** `listo-notifications-events`
+
+**Application Properties:**
+```json
+{
+  "ServiceOrigin": "orders",
+  "MessageType": "OrderConfirmed",
+  "Priority": "normal",
+  "CorrelationId": "trace-order-001",
+  "ContentType": "application/json"
+}
+```
+
+**Subscription Filters:**
+- `auth-notifications`: `ServiceOrigin = 'auth'`
+- `orders-notifications`: `ServiceOrigin = 'orders'`
+- `ridesharing-notifications`: `ServiceOrigin = 'ridesharing'`
+
+#### Direct REST API (Synchronous Only)
+
+**Endpoint:** `POST /api/v1/internal/notifications/queue`
+
+**When to Use:**
+- Driver assignment alerts (orders and ridesharing)
+- Any notification requiring sub-2-second delivery confirmation
+
+**Example Request:**
+```http
+POST /api/v1/internal/notifications/queue
+Host: notification-api.listoexpress.com
+X-Service-Secret: {secret}
+X-Correlation-Id: trace-order-001
+X-Idempotency-Key: orders-driver-assigned-ORD-001
+Content-Type: application/json
+
+{
+  "userId": "driver-uuid-789",
+  "serviceOrigin": "orders",
+  "channel": "push",
+  "templateKey": "driver_assigned",
+  "priority": "high",
+  "synchronous": true,
+  "data": { ... },
+  "encryptedFirebaseToken": "encrypted_token_here"
+}
+```
+
+**Response (Success):**
+```json
+{
+  "notificationId": "notif-uuid-999",
+  "status": "delivered",
+  "channels": {
+    "push": {
+      "delivered": true,
+      "providerMessageId": "fcm-msg-123",
+      "deliveredAt": "2024-01-15T10:50:01.234Z"
+    },
+    "signalr": {
+      "broadcast": true,
+      "deliveredAt": "2024-01-15T10:50:01.156Z"
+    }
+  },
+  "processingTimeMs": 1234
+}
+```
+
+---
+
+### 6.5. Event Mapping Summary Table
+
+| Service | Event | Channels | Priority | Sync/Async | Template Key |
+|---------|-------|----------|----------|------------|-------------|
+| **Auth** | EmailVerificationRequested | Email | High | Async | `email_verification_requested` |
+| **Auth** | MobileVerificationRequested | SMS | High | Async | `mobile_verification_requested` |
+| **Auth** | PasswordResetRequested | Email, SMS | High | Async | `password_reset_requested` |
+| **Auth** | TwoFactorCodeIssued | SMS, Email | High | Async | `two_factor_code_issued` |
+| **Auth** | SuspiciousLoginDetected | Email, Push | High | Async | `suspicious_login_detected` |
+| **Orders** | OrderConfirmed | Email, Push | Normal | Async | `order_confirmed` |
+| **Orders** | OrderStatusUpdated | Push | Normal | Async | `order_status_updated` |
+| **Orders** | **DriverAssigned** | **Push** | **High** | **Sync** | `driver_assigned` |
+| **Orders** | DeliveryCompleted | Email, Push | Normal | Async | `delivery_completed` |
+| **RideSharing** | RideBooked | Push, Email | Normal | Async | `ride_booked` |
+| **RideSharing** | **DriverAssigned** | **Push** | **High** | **Sync** | `ridesharing_driver_assigned` |
+| **RideSharing** | DriverArriving | Push | High | Async | `driver_arriving` |
+| **RideSharing** | RideCompleted | Email, Push | Normal | Async | `ride_completed` |
+
+**Total Events:** 13 (2 synchronous, 11 asynchronous)
+
+---
+
 ## 6. API Implementation
 
 - **Controllers:** Scaffold controllers for each resource (Notifications, Devices, Messages, SMS, Email, Preferences, Analytics, Health).
