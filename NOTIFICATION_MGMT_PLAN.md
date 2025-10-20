@@ -1968,7 +1968,582 @@ Content-Type: application/json
 
 ---
 
-## 7. API Implementation
+## 7. Cost Management & Rate Limiting
+
+This section defines the cost tracking, budget management, and rate limiting strategies for the notification service. Both per-tenant and per-service tracking are implemented with maximum caps enforcement.
+
+### 7.1. Redis Token Bucket Rate Limiting
+
+**Implementation:** Redis-based token bucket algorithm with atomic operations
+
+**Key Structure:**
+- **Per-User:** `rl:user:{tenantId}:{userId}:{channel}`
+- **Per-Service:** `rl:service:{tenantId}:{serviceOrigin}:{channel}`
+- **Per-Tenant:** `rl:tenant:{tenantId}:{channel}`
+
+**Token Bucket Data:**
+```json
+{
+  "tokens": 60,
+  "capacity": 60,
+  "refillRate": 60,
+  "refillIntervalSeconds": 3600,
+  "lastRefillTimestamp": 1705315800
+}
+```
+
+**Lua Script (Atomic Check and Consume):**
+```lua
+-- rate_limit.lua
+local key = KEYS[1]
+local capacity = tonumber(ARGV[1])
+local refillRate = tonumber(ARGV[2])
+local refillInterval = tonumber(ARGV[3])
+local requestedTokens = tonumber(ARGV[4])
+local now = tonumber(ARGV[5])
+
+-- Get current bucket state
+local bucket = redis.call('HMGET', key, 'tokens', 'lastRefillTimestamp')
+local tokens = tonumber(bucket[1]) or capacity
+local lastRefill = tonumber(bucket[2]) or now
+
+-- Calculate tokens to add based on time elapsed
+local elapsedSeconds = now - lastRefill
+if elapsedSeconds > 0 then
+    local tokensToAdd = math.floor((elapsedSeconds / refillInterval) * refillRate)
+    tokens = math.min(capacity, tokens + tokensToAdd)
+    lastRefill = now
+end
+
+-- Check if enough tokens available
+if tokens >= requestedTokens then
+    tokens = tokens - requestedTokens
+    redis.call('HMSET', key, 'tokens', tokens, 'lastRefillTimestamp', lastRefill)
+    redis.call('EXPIRE', key, refillInterval * 2)
+    return {1, tokens, capacity}
+else
+    redis.call('HMSET', key, 'tokens', tokens, 'lastRefillTimestamp', lastRefill)
+    redis.call('EXPIRE', key, refillInterval * 2)
+    local retryAfter = math.ceil((requestedTokens - tokens) * refillInterval / refillRate)
+    return {0, tokens, retryAfter}
+end
+```
+
+**C# .NET 9 Implementation:**
+```csharp
+using StackExchange.Redis;
+using System.Security.Cryptography;
+
+namespace Listo.Notification.Infrastructure.RateLimiting;
+
+public class RedisTokenBucketLimiter
+{
+    private readonly IConnectionMultiplexer _redis;
+    private readonly string _luaScript;
+    
+    public RedisTokenBucketLimiter(IConnectionMultiplexer redis)
+    {
+        _redis = redis;
+        _luaScript = LoadLuaScript(); // Load from embedded resource or file
+    }
+    
+    public async Task<RateLimitResult> CheckAndConsumeAsync(
+        string tenantId,
+        string userId,
+        string channel,
+        RateLimitConfig config,
+        int tokensRequested = 1)
+    {
+        var key = $"rl:user:{tenantId}:{userId}:{channel}";
+        var db = _redis.GetDatabase();
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        
+        var result = await db.ScriptEvaluateAsync(
+            _luaScript,
+            new RedisKey[] { key },
+            new RedisValue[] 
+            {
+                config.Capacity,
+                config.RefillRate,
+                config.RefillIntervalSeconds,
+                tokensRequested,
+                now
+            }
+        );
+        
+        var values = (RedisValue[])result!;
+        var allowed = (int)values[0] == 1;
+        var remainingTokens = (int)values[1];
+        var retryAfterOrCapacity = (int)values[2];
+        
+        return new RateLimitResult
+        {
+            Allowed = allowed,
+            Limit = config.Capacity,
+            Remaining = remainingTokens,
+            RetryAfterSeconds = allowed ? null : retryAfterOrCapacity,
+            ResetAt = DateTimeOffset.UtcNow.AddSeconds(config.RefillIntervalSeconds)
+        };
+    }
+    
+    public async Task<RateLimitResult> CheckServiceLimitAsync(
+        string tenantId,
+        string serviceOrigin,
+        string channel,
+        RateLimitConfig config)
+    {
+        var key = $"rl:service:{tenantId}:{serviceOrigin}:{channel}";
+        // Similar implementation
+        return await CheckAndConsumeInternalAsync(key, config);
+    }
+    
+    private async Task<RateLimitResult> CheckAndConsumeInternalAsync(
+        string key, 
+        RateLimitConfig config, 
+        int tokensRequested = 1)
+    {
+        // Implementation details...
+    }
+}
+
+public record RateLimitConfig(
+    int Capacity,
+    int RefillRate,
+    int RefillIntervalSeconds,
+    int MaxCap
+);
+
+public record RateLimitResult
+{
+    public required bool Allowed { get; init; }
+    public required int Limit { get; init; }
+    public required int Remaining { get; init; }
+    public int? RetryAfterSeconds { get; init; }
+    public DateTimeOffset ResetAt { get; init; }
+}
+```
+
+---
+
+### 7.2. Rate Limiting Middleware
+
+**HTTP Response Headers:**
+- `X-RateLimit-Limit`: Maximum requests allowed in window
+- `X-RateLimit-Remaining`: Remaining requests in current window
+- `X-RateLimit-Reset`: Unix timestamp when window resets
+- `Retry-After`: Seconds to wait before retrying (429 responses only)
+
+**Middleware Implementation:**
+```csharp
+using Microsoft.AspNetCore.Http;
+
+namespace Listo.Notification.API.Middleware;
+
+public class RateLimitingMiddleware
+{
+    private readonly RequestDelegate _next;
+    private readonly RedisTokenBucketLimiter _limiter;
+    private readonly ILogger<RateLimitingMiddleware> _logger;
+    
+    public RateLimitingMiddleware(
+        RequestDelegate next,
+        RedisTokenBucketLimiter limiter,
+        ILogger<RateLimitingMiddleware> logger)
+    {
+        _next = next;
+        _limiter = limiter;
+        _logger = logger;
+    }
+    
+    public async Task InvokeAsync(HttpContext context)
+    {
+        // Extract tenant and user from JWT claims
+        var tenantId = context.User.FindFirst("tenant_id")?.Value;
+        var userId = context.User.FindFirst("sub")?.Value;
+        
+        if (string.IsNullOrEmpty(tenantId) || string.IsNullOrEmpty(userId))
+        {
+            await _next(context);
+            return;
+        }
+        
+        // Get rate limit config from database (cached)
+        var config = await GetRateLimitConfigAsync(tenantId, "*", "api");
+        
+        // Check rate limit
+        var result = await _limiter.CheckAndConsumeAsync(
+            tenantId, userId, "api", config
+        );
+        
+        // Add headers
+        context.Response.Headers.Append("X-RateLimit-Limit", result.Limit.ToString());
+        context.Response.Headers.Append("X-RateLimit-Remaining", result.Remaining.ToString());
+        context.Response.Headers.Append("X-RateLimit-Reset", result.ResetAt.ToUnixTimeSeconds().ToString());
+        
+        if (!result.Allowed)
+        {
+            context.Response.StatusCode = 429;
+            context.Response.Headers.Append("Retry-After", result.RetryAfterSeconds.ToString());
+            
+            await context.Response.WriteAsJsonAsync(new
+            {
+                error = new
+                {
+                    code = "RATE_LIMIT_EXCEEDED",
+                    message = "Rate limit exceeded. Please retry after the specified time.",
+                    retryAfter = result.RetryAfterSeconds,
+                    limit = result.Limit
+                }
+            });
+            
+            _logger.LogWarning(
+                "Rate limit exceeded for tenant {TenantId}, user {UserId}",
+                tenantId, userId
+            );
+            return;
+        }
+        
+        await _next(context);
+    }
+    
+    private async Task<RateLimitConfig> GetRateLimitConfigAsync(
+        string tenantId, string serviceOrigin, string channel)
+    {
+        // Query RateLimiting table with tenant-specific fallback
+        // Tenant-specific config overrides global default
+        return new RateLimitConfig(60, 60, 3600, 100); // Example
+    }
+}
+```
+
+---
+
+### 7.3. Quota Enforcement Strategy
+
+**Priority Order (Admin Override → Service Quota → User Quota → Global):**
+
+1. **Admin Override Check:** If `X-Admin-Override: true` header present with valid `notifications:admin` scope
+2. **Service Quota Check:** Per-service daily/monthly caps from `RateLimiting` table
+3. **User Quota Check:** Per-user hourly caps from `RateLimiting` table  
+4. **Maximum Cap Enforcement:** Absolute maximum (cannot be overridden except by admin)
+
+**Quota Check Flow:**
+```mermaid
+flowchart TD
+    A[Incoming Request] --> B{Admin Override Header?}
+    B -->|Yes| C{Valid Admin Token?}
+    C -->|Yes| D[Allow - Log Override]
+    C -->|No| E[Deny - Invalid Admin]
+    B -->|No| F{Check Tenant Service Quota}
+    F -->|Within Limit| G{Check User Quota}
+    F -->|Exceeded| H{Below Max Cap?}
+    H -->|Yes| I[Allow - Warn Near Limit]
+    H -->|No| J[Deny - 429 Max Cap]
+    G -->|Within Limit| K[Allow - Add Headers]
+    G -->|Exceeded| L[Deny - 429 User Quota]
+    K --> M[Process Request]
+    D --> M
+    I --> M
+```
+
+---
+
+### 7.4. Budget Tracking (Per-Tenant AND Per-Service)
+
+**Budget Configuration:**
+```json
+{
+  "tenantId": "tenant-uuid-123",
+  "serviceOrigin": "orders",
+  "channel": "sms",
+  "currency": "USD",
+  "monthlyBudgetMicros": 50000000,
+  "alertThresholds": [0.8, 1.0],
+  "currentSpendMicros": 35000000,
+  "periodStart": "2024-01-01T00:00:00Z",
+  "periodEnd": "2024-01-31T23:59:59Z"
+}
+```
+
+**Cost Computation Per Channel:**
+- **Email (SendGrid):** $0.00095/email → 950 micros
+- **SMS (Twilio US):** $0.0079/message → 7900 micros
+- **SMS Multi-segment:** 7900 micros × segment count
+- **Push (FCM):** $0 (free, tracked for analytics)
+- **In-App:** $0 (free, tracked for analytics)
+
+**Budget Monitoring (Azure Function - Hourly):**
+```csharp
+using Microsoft.Azure.Functions.Worker;
+
+namespace Listo.Notification.Functions;
+
+public class BudgetMonitorFunction
+{
+    private readonly NotificationDbContext _context;
+    private readonly IServiceBusPublisher _serviceBus;
+    
+    [Function("BudgetMonitor")]
+    public async Task RunAsync(
+        [TimerTrigger("0 0 * * * *")] TimerInfo timer) // Every hour
+    {
+        var currentMonth = DateTime.UtcNow;
+        var periodStart = new DateTime(currentMonth.Year, currentMonth.Month, 1);
+        var periodEnd = periodStart.AddMonths(1).AddSeconds(-1);
+        
+        // Query cost summaries per tenant and service
+        var tenantCosts = await _context.CostTracking
+            .Where(c => c.OccurredAt >= periodStart && c.OccurredAt <= periodEnd)
+            .GroupBy(c => new { c.TenantId, c.ServiceOrigin, c.Channel, c.Currency })
+            .Select(g => new
+            {
+                g.Key.TenantId,
+                g.Key.ServiceOrigin,
+                g.Key.Channel,
+                g.Key.Currency,
+                TotalCostMicros = g.Sum(c => c.TotalCostMicros)
+            })
+            .ToListAsync();
+        
+        // Check against budgets
+        foreach (var cost in tenantCosts)
+        {
+            var budget = await GetBudgetAsync(
+                cost.TenantId, cost.ServiceOrigin, cost.Channel
+            );
+            
+            if (budget == null) continue;
+            
+            var utilizationPercent = (double)cost.TotalCostMicros / budget.MonthlyBudgetMicros;
+            
+            // Check thresholds (80%, 100%)
+            if (utilizationPercent >= 0.8 && !budget.Alert80Sent)
+            {
+                await SendBudgetAlertAsync(cost.TenantId, cost.ServiceOrigin, 80, utilizationPercent);
+                budget.Alert80Sent = true;
+            }
+            
+            if (utilizationPercent >= 1.0 && !budget.Alert100Sent)
+            {
+                await SendBudgetAlertAsync(cost.TenantId, cost.ServiceOrigin, 100, utilizationPercent);
+                budget.Alert100Sent = true;
+                
+                // Publish budget exceeded event to Service Bus
+                await _serviceBus.PublishAsync(new BudgetThresholdCrossedEvent
+                {
+                    TenantId = cost.TenantId,
+                    ServiceOrigin = cost.ServiceOrigin,
+                    Channel = cost.Channel,
+                    ThresholdPercent = 100,
+                    ActualPercent = utilizationPercent * 100,
+                    CurrentSpend = cost.TotalCostMicros / 1000000.0m,
+                    Budget = budget.MonthlyBudgetMicros / 1000000.0m,
+                    Currency = cost.Currency
+                });
+            }
+        }
+        
+        await _context.SaveChangesAsync();
+    }
+    
+    private async Task SendBudgetAlertAsync(
+        Guid tenantId, string serviceOrigin, int threshold, double actual)
+    {
+        // Send email + SignalR notification to admins
+    }
+}
+```
+
+**Budget Threshold Event:**
+```json
+{
+  "specversion": "1.0",
+  "type": "com.listoexpress.notifications.budget.threshold-crossed",
+  "source": "https://notifications.listoexpress.com",
+  "id": "evt-budget-001",
+  "time": "2024-01-25T14:30:00Z",
+  "datacontenttype": "application/json",
+  "data": {
+    "tenantId": "tenant-uuid-123",
+    "serviceOrigin": "orders",
+    "channel": "sms",
+    "thresholdPercent": 100,
+    "actualPercent": 105.3,
+    "currentSpend": 52.65,
+    "budget": 50.00,
+    "currency": "USD"
+  }
+}
+```
+
+---
+
+### 7.5. Admin Override with Audit Trail
+
+**Admin Override Request:**
+```http
+POST /api/v1/notifications/send
+Authorization: Bearer {admin_jwt_with_notifications:admin_scope}
+X-Admin-Override: true
+X-Tenant-Id: tenant-uuid-123
+Content-Type: application/json
+
+{
+  "reason": "Critical system alert - payment failure notification",
+  "scopeType": "tenant",
+  "scopeId": "tenant-uuid-123",
+  "ttlMinutes": 60,
+  "notification": {
+    "userId": "user-uuid-456",
+    "channel": "sms",
+    "templateKey": "payment_failed",
+    "data": { ... }
+  }
+}
+```
+
+**Admin Override Validation:**
+```csharp
+public class AdminOverrideService
+{
+    public async Task<AdminOverrideResult> ValidateOverrideAsync(
+        HttpContext context, AdminOverrideRequest request)
+    {
+        // 1. Verify JWT has notifications:admin scope
+        if (!context.User.HasClaim("scope", "notifications:admin"))
+        {
+            return AdminOverrideResult.Forbidden("Missing admin scope");
+        }
+        
+        // 2. Validate reason provided
+        if (string.IsNullOrWhiteSpace(request.Reason) || request.Reason.Length < 20)
+        {
+            return AdminOverrideResult.Invalid("Reason must be at least 20 characters");
+        }
+        
+        // 3. Create audit record
+        var audit = new AdminOverrideAudit
+        {
+            OverrideId = Guid.NewGuid(),
+            AdminUserId = context.User.FindFirst("sub")!.Value,
+            TenantId = request.ScopeId,
+            ScopeType = request.ScopeType,
+            Reason = request.Reason,
+            TtlMinutes = request.TtlMinutes,
+            CreatedAt = DateTime.UtcNow,
+            ExpiresAt = DateTime.UtcNow.AddMinutes(request.TtlMinutes),
+            IpAddress = context.Connection.RemoteIpAddress?.ToString(),
+            UserAgent = context.Request.Headers.UserAgent.ToString()
+        };
+        
+        await _context.AdminOverrides.AddAsync(audit);
+        await _context.SaveChangesAsync();
+        
+        // 4. Log to audit trail
+        _logger.LogWarning(
+            "Admin override granted: {OverrideId} by {AdminUserId} for {TenantId}. Reason: {Reason}",
+            audit.OverrideId, audit.AdminUserId, audit.TenantId, audit.Reason
+        );
+        
+        return AdminOverrideResult.Allowed(audit.OverrideId);
+    }
+}
+```
+
+**Audit Log Entry:**
+```json
+{
+  "overrideId": "override-uuid-789",
+  "adminUserId": "admin-uuid-111",
+  "adminEmail": "admin@listoexpress.com",
+  "tenantId": "tenant-uuid-123",
+  "scopeType": "tenant",
+  "reason": "Critical system alert - payment failure notification",
+  "ttlMinutes": 60,
+  "createdAt": "2024-01-25T14:30:00Z",
+  "expiresAt": "2024-01-25T15:30:00Z",
+  "ipAddress": "203.0.113.42",
+  "userAgent": "Mozilla/5.0..."
+}
+```
+
+---
+
+### 7.6. Configuration (appsettings.json)
+
+```json
+{
+  "RateLimiting": {
+    "Redis": {
+      "ConnectionString": "{{REDIS_CONNECTION_STRING}}",
+      "DefaultDatabase": 0
+    },
+    "Defaults": {
+      "PerUserHourly": {
+        "Capacity": 60,
+        "RefillRate": 60,
+        "RefillIntervalSeconds": 3600,
+        "BurstSize": 20,
+        "MaxCap": 100
+      },
+      "PerServiceDaily": {
+        "Email": {
+          "Capacity": 50000,
+          "MaxCap": 100000
+        },
+        "SMS": {
+          "Capacity": 10000,
+          "MaxCap": 20000
+        },
+        "Push": {
+          "Capacity": 200000,
+          "MaxCap": 500000
+        },
+        "InApp": {
+          "Capacity": 999999999,
+          "MaxCap": 999999999
+        }
+      }
+    }
+  },
+  "Budgets": {
+    "Defaults": {
+      "MonthlyPerTenantUsd": {
+        "Email": 100.00,
+        "SMS": 500.00,
+        "Push": 0.00
+      },
+      "AlertThresholds": [0.8, 1.0],
+      "Currency": "USD"
+    },
+    "CostPerUnit": {
+      "Email": {
+        "Provider": "sendgrid",
+        "UnitCostMicros": 950
+      },
+      "SMS": {
+        "Provider": "twilio",
+        "UnitCostMicros": 7900,
+        "PerSegment": true
+      },
+      "Push": {
+        "Provider": "fcm",
+        "UnitCostMicros": 0
+      }
+    }
+  },
+  "AdminOverride": {
+    "RequiredScope": "notifications:admin",
+    "MinReasonLength": 20,
+    "DefaultTtlMinutes": 60,
+    "MaxTtlMinutes": 1440
+  }
+}
+```
+
+---
+
+## 8. API Implementation
 
 This section outlines the API layer structure, controller design, endpoint implementations, and integration with the application and infrastructure layers.
 
