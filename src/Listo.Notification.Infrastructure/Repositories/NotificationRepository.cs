@@ -150,4 +150,25 @@ public class NotificationRepository : INotificationRepository
             ["failed"] = notifications.Count(n => n.Status == NotificationStatus.Failed)
         };
     }
+
+    public async Task<IEnumerable<NotificationEntity>> GetScheduledNotificationsAsync(
+        DateTime scheduledBefore,
+        int maxResults = 100,
+        CancellationToken cancellationToken = default)
+    {
+        var notifications = await _context.Notifications
+            .Where(n => 
+                n.Status == NotificationStatus.Queued &&
+                n.ScheduledFor != null &&
+                n.ScheduledFor <= scheduledBefore)
+            .OrderBy(n => n.ScheduledFor)
+            .Take(maxResults)
+            .ToListAsync(cancellationToken);
+
+        _logger.LogInformation(
+            "Retrieved {Count} scheduled notifications ready to send (scheduled before {ScheduledBefore})",
+            notifications.Count, scheduledBefore);
+
+        return notifications;
+    }
 }

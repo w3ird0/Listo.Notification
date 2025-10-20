@@ -49,4 +49,16 @@ public interface INotificationRepository
     /// Gets notification statistics for a user.
     /// </summary>
     Task<Dictionary<string, int>> GetUserStatisticsAsync(Guid tenantId, Guid userId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Gets notifications scheduled to be sent at or before the specified time.
+    /// </summary>
+    /// <param name="scheduledBefore">Get notifications scheduled before this time.</param>
+    /// <param name="maxResults">Maximum number of notifications to return (default: 100).</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Collection of scheduled notifications ready to be sent.</returns>
+    Task<IEnumerable<NotificationEntity>> GetScheduledNotificationsAsync(
+        DateTime scheduledBefore,
+        int maxResults = 100,
+        CancellationToken cancellationToken = default);
 }

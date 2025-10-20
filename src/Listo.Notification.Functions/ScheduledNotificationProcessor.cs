@@ -45,24 +45,20 @@ public class ScheduledNotificationProcessor
         
         try
         {
-            // TODO: Add INotificationRepository.GetScheduledNotificationsAsync method
-            // For now, we'll process in-memory or through a query
-            // This demonstrates the pattern that would be implemented
-            
-            /*
-            // Pseudocode for actual implementation:
             var now = DateTime.UtcNow;
             var scheduledNotifications = await _notificationRepository.GetScheduledNotificationsAsync(now);
             
-            _logger.LogInformation("Found {Count} scheduled notifications to process", scheduledNotifications.Count());
+            var notificationList = scheduledNotifications.ToList();
+            _logger.LogInformation("Found {Count} scheduled notifications to process", notificationList.Count);
             
-            foreach (var notification in scheduledNotifications)
+            foreach (var notification in notificationList)
             {
                 await ProcessNotificationAsync(notification);
             }
-            */
             
-            _logger.LogInformation("Scheduled notification processor completed successfully");
+            _logger.LogInformation(
+                "Scheduled notification processor completed successfully. Processed {Count} notifications",
+                notificationList.Count);
         }
         catch (Exception ex)
         {
