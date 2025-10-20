@@ -12,7 +12,7 @@ public class ConversationEntity
     /// <summary>
     /// Type: customer_support, customer_driver
     /// </summary>
-    public string Type { get; set; } = string.Empty;
+    public ConversationType Type { get; set; }
 
     /// <summary>
     /// JSON array of participant user IDs

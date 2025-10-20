@@ -1,3 +1,5 @@
+using Listo.Notification.Domain.Enums;
+
 namespace Listo.Notification.Domain.Entities;
 
 /// <summary>
@@ -17,7 +19,7 @@ public class DeviceEntity
     /// <summary>
     /// Platform: android, ios, web
     /// </summary>
-    public string Platform { get; set; } = string.Empty;
+    public DevicePlatform Platform { get; set; }
 
     /// <summary>
     /// JSON: model, osVersion, appVersion

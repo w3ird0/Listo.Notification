@@ -39,6 +39,8 @@ public class NotificationDbContext : DbContext
     public DbSet<AuditLogEntity> AuditLogs => Set<AuditLogEntity>();
     public DbSet<ConversationEntity> Conversations => Set<ConversationEntity>();
     public DbSet<MessageEntity> Messages => Set<MessageEntity>();
+    public DbSet<RetryPolicyEntity> RetryPolicies => Set<RetryPolicyEntity>();
+    public DbSet<RateLimitingEntity> RateLimiting => Set<RateLimitingEntity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -221,6 +223,8 @@ public class NotificationDbContext : DbContext
             entity.ToTable("Messages");
             entity.HasKey(e => e.MessageId);
 
+            entity.Property(e => e.Status).HasConversion<string>();
+
             entity.HasIndex(e => new { e.ConversationId, e.SentAt })
                 .HasDatabaseName("IX_Messages_ConversationId_SentAt");
 
@@ -228,6 +232,39 @@ public class NotificationDbContext : DbContext
                 .HasDatabaseName("IX_Messages_RecipientUserId_Status")
                 .HasFilter("RecipientUserId IS NOT NULL");
         });
+
+        // Configure RetryPolicy table
+        modelBuilder.Entity<RetryPolicyEntity>(entity =>
+        {
+            entity.ToTable("RetryPolicy");
+            entity.HasKey(e => e.PolicyId);
+
+            // Unique constraint on ServiceOrigin and Channel
+            entity.HasIndex(e => new { e.ServiceOrigin, e.Channel })
+                .IsUnique()
+                .HasDatabaseName("UX_RetryPolicy_ServiceOrigin_Channel");
+        });
+
+        // Configure RateLimiting table
+        modelBuilder.Entity<RateLimitingEntity>(entity =>
+        {
+            entity.ToTable("RateLimiting");
+            entity.HasKey(e => e.ConfigId);
+
+            // Unique constraint on TenantId, ServiceOrigin, and Channel
+            entity.HasIndex(e => new { e.TenantId, e.ServiceOrigin, e.Channel })
+                .IsUnique()
+                .HasDatabaseName("UX_RateLimiting_TenantId_ServiceOrigin_Channel");
+        });
+
+        // Configure ConversationType and DevicePlatform enums
+        modelBuilder.Entity<ConversationEntity>()
+            .Property(e => e.Type)
+            .HasConversion<string>();
+
+        modelBuilder.Entity<DeviceEntity>()
+            .Property(e => e.Platform)
+            .HasConversion<string>();
     }
 
     public override Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)

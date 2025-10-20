@@ -1,3 +1,5 @@
+using Listo.Notification.Domain.Enums;
+
 namespace Listo.Notification.Domain.Entities;
 
 /// <summary>
@@ -29,7 +31,7 @@ public class MessageEntity
     /// <summary>
     /// Status: sent, delivered, read, failed
     /// </summary>
-    public string Status { get; set; } = "sent";
+    public MessageStatus Status { get; set; } = MessageStatus.Sent;
 
     public DateTime SentAt { get; set; }
 
