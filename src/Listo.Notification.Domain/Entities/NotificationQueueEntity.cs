@@ -56,4 +56,14 @@ public class NotificationQueueEntity
     public string CorrelationId { get; set; } = string.Empty;
 
     public DateTime CreatedAt { get; set; }
+
+    /// <summary>
+    /// Soft delete flag for data retention compliance.
+    /// </summary>
+    public bool IsDeleted { get; set; } = false;
+
+    /// <summary>
+    /// Timestamp when the queue entry was soft deleted.
+    /// </summary>
+    public DateTime? DeletedAt { get; set; }
 }

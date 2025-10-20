@@ -13,10 +13,20 @@
       "Host": "Warning"
     }
   },
-  "functionTimeout": "00:05:00",
+  "functionTimeout": "00:10:00",
   "extensions": {
     "http": {
       "routePrefix": "api"
+    },
+    "durableTask": {
+      "hubName": "ListoNotificationFunctions"
     }
+  },
+  "singleton": {
+    "listenerLockPeriod": "00:01:00",
+    "listenerLockRecoveryPollingInterval": "00:01:00",
+    "lockPeriod": "00:00:15",
+    "lockAcquisitionTimeout": "00:05:00",
+    "lockAcquisitionPollingInterval": "00:00:05"
   }
 }

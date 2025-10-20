@@ -45,4 +45,14 @@ public class AuditLogEntity
     public string? AfterJson { get; set; }
 
     public DateTime OccurredAt { get; set; }
+
+    /// <summary>
+    /// Soft delete flag for data retention compliance.
+    /// </summary>
+    public bool IsDeleted { get; set; } = false;
+
+    /// <summary>
+    /// Timestamp when the audit log was soft deleted.
+    /// </summary>
+    public DateTime? DeletedAt { get; set; }
 }

@@ -122,4 +122,14 @@ public class NotificationEntity
     /// Last update timestamp (UTC)
     /// </summary>
     public DateTime UpdatedAt { get; set; }
+
+    /// <summary>
+    /// Soft delete flag for data retention compliance.
+    /// </summary>
+    public bool IsDeleted { get; set; } = false;
+
+    /// <summary>
+    /// Timestamp when the notification was soft deleted.
+    /// </summary>
+    public DateTime? DeletedAt { get; set; }
 }

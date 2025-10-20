@@ -33,12 +33,14 @@ public class ScheduledNotificationProcessor
     }
 
     /// <summary>
-    /// Timer-triggered function that runs every minute.
-    /// CRON: "0 */1 * * * *" = every minute
+    /// Timer-triggered function for processing scheduled notifications.
+    /// Timer schedule: Configurable via ScheduledNotificationProcessor:Schedule (default: "0 */1 * * * *" = every minute).
+    /// Singleton mode to prevent concurrent execution.
     /// </summary>
     [Function(nameof(ScheduledNotificationProcessor))]
+    [Singleton]
     public async Task Run(
-        [TimerTrigger("0 */1 * * * *")] TimerInfo timerInfo,
+        [TimerTrigger("%ScheduledNotificationProcessor:Schedule%", RunOnStartup = false)] TimerInfo timerInfo,
         FunctionContext context)
     {
         _logger.LogInformation("Scheduled notification processor started at: {Time}", DateTime.UtcNow);

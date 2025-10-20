@@ -38,6 +38,16 @@ public class MessageEntity
     public DateTime? ReadAt { get; set; }
 
     /// <summary>
+    /// Soft delete flag for data retention compliance.
+    /// </summary>
+    public bool IsDeleted { get; set; } = false;
+
+    /// <summary>
+    /// Timestamp when the message was soft deleted.
+    /// </summary>
+    public DateTime? DeletedAt { get; set; }
+
+    /// <summary>
     /// Navigation property to parent conversation
     /// </summary>
     public ConversationEntity? Conversation { get; set; }

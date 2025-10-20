@@ -1,0 +1,36 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "dotnet-isolated",
+    "APPLICATIONINSIGHTS_CONNECTION_STRING": "",
+
+    "ConnectionStrings__NotificationDb": "Server=localhost;Database=ListoNotification;Trusted_Connection=True;",
+    
+    "ScheduledNotificationProcessor__Schedule": "0 */1 * * * *",
+    
+    "RetryProcessor__Schedule": "0 */1 * * * *",
+    "RetryProcessor__BatchSize": "100",
+    
+    "BudgetMonitor__Schedule": "0 0 * * * *",
+    "Budget__Threshold80Percent": "0.8",
+    "Budget__Threshold100Percent": "1.0",
+    
+    "DailyCostAggregator__Schedule": "0 0 0 * * *",
+    
+    "MonthlyCostRollup__Schedule": "0 0 2 1 * *",
+    
+    "DataRetentionCleaner__Schedule": "0 0 3 * * 0",
+    "DataRetention__NotificationDays": "90",
+    "DataRetention__MessageDays": "90",
+    "DataRetention__AuditLogDays": "365",
+    "DataRetention__QueueDays": "30",
+    "DataRetention__SafetyLimit": "10000",
+
+    "ServiceBus__ConnectionString": "@Microsoft.KeyVault(SecretUri=https://your-keyvault.vault.azure.net/secrets/ServiceBusConnectionString/)",
+    "ServiceBus__QueueNameStandard": "listo-notifications-queue",
+    "ServiceBus__QueueNamePriority": "listo-notifications-priority",
+    "ServiceBus__QueueNameBulk": "listo-notifications-bulk",
+    "ServiceBus__TopicName": "listo-notifications-topic"
+  }
+}
