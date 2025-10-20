@@ -397,118 +397,481 @@ sequenceDiagram
 
 ---
 
-### 4.2. Devices Table
+### 4.2. NotificationQueue Table
 
-| Field           | Type           | Description                        |
-|-----------------|----------------|------------------------------------|
-| Id              | GUID (PK)      | Device ID                          |
-| UserId          | string         | User owning the device             |
-| DeviceToken     | string         | FCM/APNS token                     |
-| Platform        | string         | android, ios                       |
-| DeviceInfo      | JSON           | Model, OS version, app version     |
-| Preferences     | JSON           | Notification preferences           |
-| LastSeen        | datetime       | Last active timestamp              |
-| Active          | bool           | Is device active                   |
-| CreatedAt       | datetime       |                                    |
-| UpdatedAt       | datetime       |                                    |
+**Purpose:** Transient queue for notifications pending delivery with encrypted PII
 
----
+| Field                    | Type           | Nullable | Description                               |
+|--------------------------|----------------|----------|-------------------------------------------|
+| QueueId                  | GUID (PK)      | No       | Queue record ID                           |
+| UserId                   | string         | Yes      | Target user (null for broadcast)          |
+| ServiceOrigin            | string         | No       | auth, orders, ridesharing, products       |
+| Channel                  | string         | No       | push, sms, email, inApp                   |
+| TemplateKey              | string         | No       | Template to use for rendering             |
+| PayloadJson              | nvarchar(max)  | No       | Template variables and metadata as JSON   |
+| EncryptedEmail           | varbinary(512) | Yes      | AES-256-GCM encrypted email               |
+| EncryptedPhoneNumber     | varbinary(512) | Yes      | AES-256-GCM encrypted phone number        |
+| EncryptedFirebaseToken   | varbinary(512) | Yes      | AES-256-GCM encrypted FCM token           |
+| EmailHash                | varchar(64)    | Yes      | SHA-256 hash for deduplication            |
+| PhoneHash                | varchar(64)    | Yes      | SHA-256 hash for deduplication            |
+| PreferredLocale          | varchar(10)    | No       | e.g., en-US, es-MX                        |
+| ScheduledAt              | datetime       | Yes      | For scheduled delivery                    |
+| Attempts                 | int            | No       | Retry attempt count (default: 0)          |
+| NextAttemptAt            | datetime       | Yes      | Calculated next retry time                |
+| LastErrorCode            | string         | Yes      | Last failure error code                   |
+| LastErrorMessage         | string         | Yes      | Last failure error message                |
+| CorrelationId            | string         | No       | Tracing correlation ID                    |
+| CreatedAt                | datetime       | No       | Queue entry creation timestamp            |
 
-### 4.3. NotificationTemplates Table
+**Indexes:**
+- `IX_NotificationQueue_ScheduledAt_Attempts` (ScheduledAt, Attempts) WHERE NextAttemptAt IS NOT NULL
+- `IX_NotificationQueue_EmailHash` (EmailHash) WHERE EmailHash IS NOT NULL
+- `IX_NotificationQueue_CreatedAt` (CreatedAt) for cleanup
 
-| Field           | Type           | Description                        |
-|-----------------|----------------|------------------------------------|
-| Id              | GUID (PK)      | Template ID                        |
-| Type            | string         | push, sms, email                   |
-| Name            | string         | Template name                      |
-| Title           | string         | (Push/Email) Title                 |
-| Body/Message    | string         | Body/content                       |
-| Subject         | string         | (Email) Subject                    |
-| Variables       | JSON           | List of variables                  |
-| Category        | string         | order_updates, security, etc.      |
-| HtmlContent     | string         | (Email) HTML content               |
-| TextContent     | string         | (Email) Text content               |
-| ExpiryMinutes   | int            | (SMS) Expiry for OTPs              |
-| CreatedAt       | datetime       |                                    |
-| UpdatedAt       | datetime       |                                    |
+**Encryption Notes:**
+- Each row uses a unique IV (Initialization Vector) stored with encrypted data
+- Encryption key from Azure Key Vault (key rotation supported)
+- Hashes used for duplicate detection without decryption
 
----
-
-### 4.4. InAppConversations Table
-
-| Field           | Type           | Description                        |
-|-----------------|----------------|------------------------------------|
-| Id              | GUID (PK)      | Conversation ID                    |
-| OrderId         | string         | Related order (nullable)           |
-| Type            | string         | order_communication, support, etc. |
-| Status          | string         | active, closed, archived           |
-| CreatedAt       | datetime       |                                    |
-| UpdatedAt       | datetime       |                                    |
+**Cleanup:**
+- Records purged 30 days after successful delivery or final failure
 
 ---
 
-### 4.5. InAppParticipants Table
+### 4.3. RetryPolicy Table
 
-| Field           | Type           | Description                        |
-|-----------------|----------------|------------------------------------|
-| Id              | GUID (PK)      | Participant ID                     |
-| ConversationId  | GUID (FK)      | Conversation reference             |
-| UserId          | string         | User in conversation               |
-| UserType        | string         | customer, driver, support          |
-| Name            | string         | Display name                       |
+**Purpose:** Configurable retry policies per service origin and channel
+
+| Field               | Type     | Nullable | Description                               |
+|---------------------|----------|----------|-------------------------------------------|
+| PolicyId            | GUID (PK)| No       | Policy ID                                 |
+| ServiceOrigin       | string   | No       | auth, orders, ridesharing, products, *    |
+| Channel             | string   | No       | push, sms, email, inApp, *                |
+| MaxAttempts         | int      | No       | Maximum retry attempts (default: 6)       |
+| BaseDelaySeconds    | int      | No       | Initial retry delay (default: 5)          |
+| BackoffFactor       | decimal  | No       | Exponential backoff multiplier (default: 2.0) |
+| JitterMs            | int      | No       | Random jitter in ms (default: 1000)       |
+| TimeoutSeconds      | int      | No       | Per-attempt timeout (default: 30)         |
+| Enabled             | bool     | No       | Is policy active (default: true)          |
+
+**Unique Constraint:** (ServiceOrigin, Channel)
+
+**Default Policies (Seeded):**
+```sql
+INSERT INTO RetryPolicy (PolicyId, ServiceOrigin, Channel, MaxAttempts, BaseDelaySeconds, BackoffFactor, JitterMs, TimeoutSeconds, Enabled)
+VALUES
+  (NEWID(), '*', '*', 6, 5, 2.0, 1000, 30, 1),              -- Default for all
+  (NEWID(), 'orders', 'push', 3, 2, 2.0, 500, 15, 1),       -- Faster for driver assignment
+  (NEWID(), 'auth', 'sms', 4, 3, 2.0, 500, 20, 1);          -- OTP/2FA retry policy
+```
+
+**Retry Calculation Logic:**
+```
+NextAttemptDelay = (BaseDelaySeconds * (BackoffFactor ^ Attempts)) + Random(0, JitterMs)
+```
 
 ---
 
-### 4.6. InAppMessages Table
+### 4.4. CostTracking Table
 
-| Field           | Type           | Description                        |
-|-----------------|----------------|------------------------------------|
-| Id              | GUID (PK)      | Message ID                         |
-| ConversationId  | GUID (FK)      | Conversation reference             |
-| SenderId        | string         | Sender user ID                     |
-| Content         | string         | Message content                    |
-| MessageType     | string         | text, image, file, location        |
-| Metadata        | JSON           | Extra info (priority, etc.)        |
-| SentAt          | datetime       |                                    |
-| Edited          | bool           | Was message edited                 |
-| ReplyToMessageId| GUID (FK)      | Reply to another message           |
+**Purpose:** Per-message cost tracking for budget management
+
+| Field               | Type           | Nullable | Description                               |
+|---------------------|----------------|----------|-------------------------------------------|
+| CostId              | GUID (PK)      | No       | Cost record ID                            |
+| ServiceOrigin       | string         | No       | auth, orders, ridesharing, products       |
+| Channel             | string         | No       | push, sms, email, inApp                   |
+| Provider            | string         | No       | fcm, twilio, sendgrid                     |
+| UnitCostMicros      | bigint         | No       | Cost per unit in micros (1/1,000,000)     |
+| Currency            | varchar(3)     | No       | USD, EUR, etc.                            |
+| MessageId           | GUID           | Yes      | Reference to Notifications table          |
+| UsageUnits          | int            | No       | Number of units (segments for SMS)        |
+| TotalCostMicros     | bigint         | No       | UsageUnits * UnitCostMicros               |
+| OccurredAt          | datetime       | No       | Cost incurred timestamp                   |
+
+**Indexes:**
+- `IX_CostTracking_ServiceOrigin_OccurredAt` (ServiceOrigin, OccurredAt DESC)
+- `IX_CostTracking_Channel_OccurredAt` (Channel, OccurredAt DESC)
+
+**Monthly Rollup View:**
+```sql
+CREATE VIEW CostMonthlySummary AS
+SELECT 
+    ServiceOrigin,
+    Channel,
+    YEAR(OccurredAt) AS Year,
+    MONTH(OccurredAt) AS Month,
+    Currency,
+    SUM(TotalCostMicros) / 1000000.0 AS TotalCost,
+    COUNT(*) AS MessageCount,
+    AVG(TotalCostMicros) / 1000000.0 AS AvgCostPerMessage
+FROM CostTracking
+GROUP BY ServiceOrigin, Channel, YEAR(OccurredAt), MONTH(OccurredAt), Currency;
+```
+
+**Cost Examples:**
+- FCM Push: $0 (free, but track for analytics)
+- Twilio SMS (US): ~$0.0079/message → 7900 micros
+- SendGrid Email: ~$0.00095/email → 950 micros
 
 ---
 
-### 4.7. MessageReads Table
+### 4.5. RateLimiting Table
 
-| Field           | Type           | Description                        |
-|-----------------|----------------|------------------------------------|
-| Id              | GUID (PK)      | Read record ID                     |
-| MessageId       | GUID (FK)      | Message reference                  |
-| UserId          | string         | Who read                           |
-| ReadAt          | datetime       | When read                          |
+**Purpose:** Configurable rate limits per service and user
+
+| Field                    | Type     | Nullable | Description                               |
+|--------------------------|----------|----------|-------------------------------------------|
+| ConfigId                 | GUID (PK)| No       | Configuration ID                          |
+| ServiceOrigin            | string   | No       | auth, orders, ridesharing, products, *    |
+| Channel                  | string   | No       | push, sms, email, inApp, *                |
+| PerUserWindowSeconds     | int      | No       | Time window for per-user limit (3600)     |
+| PerUserMax               | int      | No       | Max per user in window (60)               |
+| PerServiceWindowSeconds  | int      | No       | Time window for per-service (86400)       |
+| PerServiceMax            | int      | No       | Max per service in window (50000)         |
+| BurstSize                | int      | No       | Allowed burst above limit (20)            |
+| Enabled                  | bool     | No       | Is limit enforced (default: true)         |
+
+**Unique Constraint:** (ServiceOrigin, Channel)
+
+**Default Limits (Seeded):**
+```sql
+INSERT INTO RateLimiting (ConfigId, ServiceOrigin, Channel, PerUserWindowSeconds, PerUserMax, PerServiceWindowSeconds, PerServiceMax, BurstSize, Enabled)
+VALUES
+  (NEWID(), '*', 'email', 3600, 60, 86400, 50000, 20, 1),
+  (NEWID(), '*', 'sms', 3600, 60, 86400, 10000, 20, 1),
+  (NEWID(), '*', 'push', 3600, 60, 86400, 200000, 20, 1),
+  (NEWID(), '*', 'inApp', 3600, 1000, 86400, 999999999, 100, 1); -- Unlimited for in-app
+```
+
+**Implementation:** Redis token bucket pattern
+
+---
+
+### 4.6. AuditLog Table
+
+**Purpose:** Immutable audit trail for compliance (GDPR, SOC 2)
+
+| Field          | Type           | Nullable | Description                               |
+|----------------|----------------|----------|-------------------------------------------|
+| AuditId        | GUID (PK)      | No       | Audit record ID                           |
+| Action         | string         | No       | created, updated, deleted, sent, delivered|
+| EntityType     | string         | No       | notification, template, preference, user  |
+| EntityId       | GUID           | No       | ID of the affected entity                 |
+| UserId         | string         | Yes      | User who performed action (null=system)   |
+| ServiceOrigin  | string         | Yes      | auth, orders, ridesharing, system         |
+| ActorType      | string         | No       | user, service, system, admin              |
+| IpAddress      | string         | Yes      | Source IP address                         |
+| UserAgent      | string         | Yes      | Browser/client user agent                 |
+| BeforeJson     | nvarchar(max)  | Yes      | Entity state before change (JSON)         |
+| AfterJson      | nvarchar(max)  | Yes      | Entity state after change (JSON)          |
+| OccurredAt     | datetime       | No       | Audit event timestamp (UTC)               |
+
+**Indexes:**
+- `IX_AuditLog_EntityType_EntityId` (EntityType, EntityId, OccurredAt DESC)
+- `IX_AuditLog_UserId_OccurredAt` (UserId, OccurredAt DESC) WHERE UserId IS NOT NULL
+- `IX_AuditLog_OccurredAt` (OccurredAt DESC)
+
+**Retention:** 13 months (for compliance), then archived or deleted
+
+---
+
+### 4.7. Templates Table
+
+**Purpose:** Notification templates with versioning and localization
+
+| Field          | Type           | Nullable | Description                               |
+|----------------|----------------|----------|-------------------------------------------|
+| TemplateId     | GUID (PK)      | No       | Template ID                               |
+| TemplateKey    | string         | No       | Unique key (e.g., order_confirmed)        |
+| Channel        | string         | No       | push, sms, email, inApp                   |
+| Locale         | varchar(10)    | No       | en-US, es-MX, fr-FR, etc.                 |
+| Subject        | string         | Yes      | Email subject or push title               |
+| Body           | nvarchar(max)  | No       | Template body with {{variables}}          |
+| Variables      | nvarchar(max)  | No       | JSON array of expected variables          |
+| Version        | int            | No       | Template version number                   |
+| IsActive       | bool           | No       | Is template active (default: true)        |
+| CreatedAt      | datetime       | No       | Template creation timestamp               |
+| UpdatedAt      | datetime       | No       | Last update timestamp                     |
+
+**Unique Constraint:** (TemplateKey, Channel, Locale, Version)
+
+**Indexes:**
+- `IX_Templates_TemplateKey_Channel_Locale` (TemplateKey, Channel, Locale) WHERE IsActive = 1
+
+**Localization Fallback Strategy:**
+1. Try exact locale match (e.g., en-US)
+2. Try language match (e.g., en)
+3. Fall back to en-US (default)
+
+**Example Template:**
+```json
+{
+  "templateKey": "order_confirmed",
+  "channel": "email",
+  "locale": "en-US",
+  "subject": "Order Confirmed - {{orderId}}",
+  "body": "Hi {{customerName}}, your order {{orderId}} has been confirmed! Expected delivery: {{deliveryTime}}.",
+  "variables": ["customerName", "orderId", "deliveryTime"],
+  "version": 1,
+  "isActive": true
+}
+```
 
 ---
 
 ### 4.8. Preferences Table
 
-| Field           | Type           | Description                        |
-|-----------------|----------------|------------------------------------|
-| Id              | GUID (PK)      | Preference ID                      |
-| UserId          | string         | User reference                     |
-| PushPreferences | JSON           | orderUpdates, promotions, etc.     |
-| EmailPreferences| JSON           | orderConfirmations, newsletters    |
-| SmsPreferences  | JSON           | orderUpdates, securityAlerts       |
-| QuietHours      | JSON           | enabled, startTime, endTime, tz    |
-| CreatedAt       | datetime       |                                    |
-| UpdatedAt       | datetime       |                                    |
+**Purpose:** User notification preferences and quiet hours
+
+| Field          | Type           | Nullable | Description                               |
+|----------------|----------------|----------|-------------------------------------------|
+| PreferenceId   | GUID (PK)      | No       | Preference ID                             |
+| UserId         | string         | No       | User reference (from Listo.Auth)          |
+| Channel        | string         | No       | push, sms, email, inApp, *                |
+| IsEnabled      | bool           | No       | Is channel enabled (default: true)        |
+| QuietHours     | nvarchar(max)  | Yes      | JSON: {enabled, startTime, endTime, tz}   |
+| Topics         | nvarchar(max)  | Yes      | JSON array of enabled topics              |
+| Locale         | varchar(10)    | No       | Preferred locale (default: en-US)         |
+| UpdatedAt      | datetime       | No       | Last update timestamp                     |
+
+**Unique Constraint:** (UserId, Channel)
+
+**Indexes:**
+- `IX_Preferences_UserId` (UserId)
+
+**Default Preferences (created on user registration):**
+```json
+{
+  "userId": "user-uuid-123",
+  "channel": "*",
+  "isEnabled": true,
+  "quietHours": {
+    "enabled": false,
+    "startTime": "22:00",
+    "endTime": "08:00",
+    "timezone": "America/New_York"
+  },
+  "topics": ["order_updates", "security_alerts"],
+  "locale": "en-US"
+}
+```
 
 ---
 
-### 4.9. Analytics Tables
+### 4.9. Conversations Table (In-App Messaging)
 
-- **NotificationStats Table:** Aggregated stats for push, sms, email (sent, delivered, opened, etc.)
-- **ConversationStats Table:** Messaging analytics (total, active, response time, etc.)
+**Purpose:** In-app messaging conversations (Customer↔Support, Customer↔Driver)
+
+| Field            | Type           | Nullable | Description                               |
+|------------------|----------------|----------|-------------------------------------------|
+| ConversationId   | GUID (PK)      | No       | Conversation ID                           |
+| Type             | string         | No       | customer_support, customer_driver         |
+| ParticipantsJson | nvarchar(max)  | No       | JSON array of participant user IDs        |
+| ServiceOrigin    | string         | No       | orders, ridesharing                       |
+| CreatedAt        | datetime       | No       | Conversation creation timestamp           |
+| LastMessageAt    | datetime       | Yes      | Timestamp of most recent message          |
+
+**Indexes:**
+- `IX_Conversations_LastMessageAt` (LastMessageAt DESC)
+- Full-text index on ParticipantsJson for user lookup
+
+**Retention:**
+- Customer↔Support: 180 days after last message
+- Customer↔Driver: 30 days after last message
 
 ---
 
-### 4.10. HealthChecks Table (Optional, for custom health metrics)
+### 4.10. Messages Table (In-App Messaging)
+
+**Purpose:** Individual messages within conversations
+
+| Field            | Type           | Nullable | Description                               |
+|------------------|----------------|----------|-------------------------------------------|
+| MessageId        | GUID (PK)      | No       | Message ID                                |
+| ConversationId   | GUID (FK)      | No       | Parent conversation                       |
+| SenderUserId     | string         | No       | User ID of sender                         |
+| RecipientUserId  | string         | Yes      | Specific recipient (null=all participants)|
+| Body             | nvarchar(max)  | No       | Message content (text, markdown)          |
+| AttachmentsJson  | nvarchar(max)  | Yes      | JSON array of file URLs                   |
+| Status           | string         | No       | sent, delivered, read, failed             |
+| SentAt           | datetime       | No       | Message sent timestamp                    |
+| ReadAt           | datetime       | Yes      | Message read timestamp                    |
+
+**Indexes:**
+- `IX_Messages_ConversationId_SentAt` (ConversationId, SentAt DESC)
+- `IX_Messages_RecipientUserId_Status` (RecipientUserId, Status) WHERE RecipientUserId IS NOT NULL
+
+**Foreign Key:** ConversationId → Conversations.ConversationId (ON DELETE CASCADE)
+
+---
+
+### 4.11. Devices Table
+
+**Purpose:** User devices for push notification delivery
+
+| Field          | Type           | Nullable | Description                               |
+|----------------|----------------|----------|-------------------------------------------|
+| DeviceId       | GUID (PK)      | No       | Device ID                                 |
+| UserId         | string         | No       | User owning the device                    |
+| DeviceToken    | string         | No       | FCM/APNS token (hashed for security)      |
+| Platform       | string         | No       | android, ios, web                         |
+| DeviceInfo     | nvarchar(max)  | Yes      | JSON: model, osVersion, appVersion        |
+| LastSeen       | datetime       | No       | Last active timestamp                     |
+| Active         | bool           | No       | Is device active (default: true)          |
+| CreatedAt      | datetime       | No       | Device registration timestamp             |
+| UpdatedAt      | datetime       | No       | Last update timestamp                     |
+
+**Unique Constraint:** (DeviceToken) to prevent duplicates
+
+**Indexes:**
+- `IX_Devices_UserId_Active` (UserId, Active)
+- `IX_Devices_LastSeen` (LastSeen) for cleanup
+
+**Cleanup:** Remove devices inactive for > 90 days
+
+---
+
+### 4.12. Entity Relationship Diagram (ERD)
+
+```mermaid
+erDiagram
+    NOTIFICATIONS ||--o{ NOTIFICATION_QUEUE : "originates_from"
+    NOTIFICATION_QUEUE }o--|| RETRY_POLICY : "uses"
+    NOTIFICATIONS ||--o{ COST_TRACKING : "tracks_cost"
+    TEMPLATES ||--o{ NOTIFICATION_QUEUE : "renders_with"
+    PREFERENCES ||--o{ NOTIFICATION_QUEUE : "filters"
+    DEVICES ||--o{ NOTIFICATION_QUEUE : "targets"
+    CONVERSATIONS ||--o{ MESSAGES : "contains"
+    AUDIT_LOG ||--o{ NOTIFICATIONS : "audits"
+    AUDIT_LOG ||--o{ TEMPLATES : "audits"
+    AUDIT_LOG ||--o{ PREFERENCES : "audits"
+    RATE_LIMITING ||--o{ NOTIFICATION_QUEUE : "limits"
+
+    NOTIFICATIONS {
+        guid Id PK
+        string UserId
+        string ServiceOrigin
+        string Channel
+        string TemplateKey
+        string Status
+        datetime CreatedAt
+    }
+
+    NOTIFICATION_QUEUE {
+        guid QueueId PK
+        string UserId
+        string ServiceOrigin
+        string Channel
+        varbinary EncryptedEmail
+        varbinary EncryptedPhoneNumber
+        int Attempts
+        datetime NextAttemptAt
+    }
+
+    RETRY_POLICY {
+        guid PolicyId PK
+        string ServiceOrigin
+        string Channel
+        int MaxAttempts
+        int BaseDelaySeconds
+    }
+
+    COST_TRACKING {
+        guid CostId PK
+        string ServiceOrigin
+        string Channel
+        bigint TotalCostMicros
+        datetime OccurredAt
+    }
+
+    TEMPLATES {
+        guid TemplateId PK
+        string TemplateKey
+        string Channel
+        string Locale
+        string Body
+    }
+
+    PREFERENCES {
+        guid PreferenceId PK
+        string UserId
+        string Channel
+        bool IsEnabled
+        json QuietHours
+    }
+
+    CONVERSATIONS {
+        guid ConversationId PK
+        string Type
+        json ParticipantsJson
+        datetime LastMessageAt
+    }
+
+    MESSAGES {
+        guid MessageId PK
+        guid ConversationId FK
+        string SenderUserId
+        string Body
+        datetime SentAt
+    }
+
+    DEVICES {
+        guid DeviceId PK
+        string UserId
+        string DeviceToken
+        string Platform
+        bool Active
+    }
+
+    AUDIT_LOG {
+        guid AuditId PK
+        string Action
+        string EntityType
+        guid EntityId
+        datetime OccurredAt
+    }
+
+    RATE_LIMITING {
+        guid ConfigId PK
+        string ServiceOrigin
+        string Channel
+        int PerUserMax
+        int PerServiceMax
+    }
+```
+
+---
+
+### 4.13. Migration Strategy
+
+**Phase 1: Core Tables**
+1. Notifications, NotificationQueue, Templates, Preferences, Devices
+2. Seed default RetryPolicy and RateLimiting configurations
+
+**Phase 2: Supporting Tables**
+3. CostTracking, AuditLog
+4. Create monthly rollup views
+
+**Phase 3: Messaging Tables**
+5. Conversations, Messages
+6. Add full-text indexes
+
+**Phase 4: Optimization**
+7. Add composite indexes based on query patterns
+8. Partition AuditLog by OccurredAt (monthly partitions)
+9. Create archived tables for retention compliance
+
+**EF Core Migrations:**
+```bash
+dotnet ef migrations add InitialCreate --project src/Listo.Notification.Infrastructure
+dotnet ef database update --project src/Listo.Notification.Infrastructure
+```
+
+**Rollback Strategy:**
+- All migrations reversible with DOWN scripts
+- Database backups before each migration
+- Blue-green deployment for zero-downtime migrations
 
 ---
 
