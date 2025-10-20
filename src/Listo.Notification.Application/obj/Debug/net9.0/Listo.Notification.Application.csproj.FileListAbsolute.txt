@@ -1,0 +1,16 @@
+D:\OneDrive\Projects\ListoExpress\Dev\Listo.Notification\src\Listo.Notification.Application\bin\Debug\net9.0\Listo.Notification.Application.deps.json
+D:\OneDrive\Projects\ListoExpress\Dev\Listo.Notification\src\Listo.Notification.Application\bin\Debug\net9.0\Listo.Notification.Application.dll
+D:\OneDrive\Projects\ListoExpress\Dev\Listo.Notification\src\Listo.Notification.Application\bin\Debug\net9.0\Listo.Notification.Application.pdb
+D:\OneDrive\Projects\ListoExpress\Dev\Listo.Notification\src\Listo.Notification.Application\bin\Debug\net9.0\Listo.Notification.Domain.dll
+D:\OneDrive\Projects\ListoExpress\Dev\Listo.Notification\src\Listo.Notification.Application\bin\Debug\net9.0\Listo.Notification.Domain.pdb
+D:\OneDrive\Projects\ListoExpress\Dev\Listo.Notification\src\Listo.Notification.Application\obj\Debug\net9.0\Listo.Notification.Application.csproj.AssemblyReference.cache
+D:\OneDrive\Projects\ListoExpress\Dev\Listo.Notification\src\Listo.Notification.Application\obj\Debug\net9.0\Listo.Notification.Application.GeneratedMSBuildEditorConfig.editorconfig
+D:\OneDrive\Projects\ListoExpress\Dev\Listo.Notification\src\Listo.Notification.Application\obj\Debug\net9.0\Listo.Notification.Application.AssemblyInfoInputs.cache
+D:\OneDrive\Projects\ListoExpress\Dev\Listo.Notification\src\Listo.Notification.Application\obj\Debug\net9.0\Listo.Notification.Application.AssemblyInfo.cs
+D:\OneDrive\Projects\ListoExpress\Dev\Listo.Notification\src\Listo.Notification.Application\obj\Debug\net9.0\Listo.Notification.Application.csproj.CoreCompileInputs.cache
+D:\OneDrive\Projects\ListoExpress\Dev\Listo.Notification\src\Listo.Notification.Application\obj\Debug\net9.0\Listo.Notification.Application.sourcelink.json
+D:\OneDrive\Projects\ListoExpress\Dev\Listo.Notification\src\Listo.Notification.Application\obj\Debug\net9.0\Listo.No.285C48C3.Up2Date
+D:\OneDrive\Projects\ListoExpress\Dev\Listo.Notification\src\Listo.Notification.Application\obj\Debug\net9.0\Listo.Notification.Application.dll
+D:\OneDrive\Projects\ListoExpress\Dev\Listo.Notification\src\Listo.Notification.Application\obj\Debug\net9.0\refint\Listo.Notification.Application.dll
+D:\OneDrive\Projects\ListoExpress\Dev\Listo.Notification\src\Listo.Notification.Application\obj\Debug\net9.0\Listo.Notification.Application.pdb
+D:\OneDrive\Projects\ListoExpress\Dev\Listo.Notification\src\Listo.Notification.Application\obj\Debug\net9.0\ref\Listo.Notification.Application.dll

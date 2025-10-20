@@ -1,0 +1,12 @@
+D:\OneDrive\Projects\ListoExpress\Dev\Listo.Notification\src\Listo.Notification.Domain\bin\Debug\net9.0\Listo.Notification.Domain.deps.json
+D:\OneDrive\Projects\ListoExpress\Dev\Listo.Notification\src\Listo.Notification.Domain\bin\Debug\net9.0\Listo.Notification.Domain.dll
+D:\OneDrive\Projects\ListoExpress\Dev\Listo.Notification\src\Listo.Notification.Domain\bin\Debug\net9.0\Listo.Notification.Domain.pdb
+D:\OneDrive\Projects\ListoExpress\Dev\Listo.Notification\src\Listo.Notification.Domain\obj\Debug\net9.0\Listo.Notification.Domain.GeneratedMSBuildEditorConfig.editorconfig
+D:\OneDrive\Projects\ListoExpress\Dev\Listo.Notification\src\Listo.Notification.Domain\obj\Debug\net9.0\Listo.Notification.Domain.AssemblyInfoInputs.cache
+D:\OneDrive\Projects\ListoExpress\Dev\Listo.Notification\src\Listo.Notification.Domain\obj\Debug\net9.0\Listo.Notification.Domain.AssemblyInfo.cs
+D:\OneDrive\Projects\ListoExpress\Dev\Listo.Notification\src\Listo.Notification.Domain\obj\Debug\net9.0\Listo.Notification.Domain.csproj.CoreCompileInputs.cache
+D:\OneDrive\Projects\ListoExpress\Dev\Listo.Notification\src\Listo.Notification.Domain\obj\Debug\net9.0\Listo.Notification.Domain.sourcelink.json
+D:\OneDrive\Projects\ListoExpress\Dev\Listo.Notification\src\Listo.Notification.Domain\obj\Debug\net9.0\Listo.Notification.Domain.dll
+D:\OneDrive\Projects\ListoExpress\Dev\Listo.Notification\src\Listo.Notification.Domain\obj\Debug\net9.0\refint\Listo.Notification.Domain.dll
+D:\OneDrive\Projects\ListoExpress\Dev\Listo.Notification\src\Listo.Notification.Domain\obj\Debug\net9.0\Listo.Notification.Domain.pdb
+D:\OneDrive\Projects\ListoExpress\Dev\Listo.Notification\src\Listo.Notification.Domain\obj\Debug\net9.0\ref\Listo.Notification.Domain.dll

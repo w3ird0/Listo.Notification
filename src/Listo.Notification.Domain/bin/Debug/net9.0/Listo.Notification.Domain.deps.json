@@ -1,0 +1,23 @@
+{
+  "runtimeTarget": {
+    "name": ".NETCoreApp,Version=v9.0",
+    "signature": ""
+  },
+  "compilationOptions": {},
+  "targets": {
+    ".NETCoreApp,Version=v9.0": {
+      "Listo.Notification.Domain/1.0.0": {
+        "runtime": {
+          "Listo.Notification.Domain.dll": {}
+        }
+      }
+    }
+  },
+  "libraries": {
+    "Listo.Notification.Domain/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    }
+  }
+}

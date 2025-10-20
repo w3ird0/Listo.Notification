@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "dgSpecHash": "kTx2Zk91rds=",
+  "success": true,
+  "projectFilePath": "D:\\OneDrive\\Projects\\ListoExpress\\Dev\\Listo.Notification\\src\\Listo.Notification.API\\Listo.Notification.API.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\clint\\.nuget\\packages\\microsoft.aspnetcore.openapi\\9.0.10\\microsoft.aspnetcore.openapi.9.0.10.nupkg.sha512",
+    "C:\\Users\\clint\\.nuget\\packages\\microsoft.openapi\\1.6.17\\microsoft.openapi.1.6.17.nupkg.sha512"
+  ],
+  "logs": []
+}
