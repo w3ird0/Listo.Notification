@@ -156,6 +156,14 @@ builder.Services.AddAuthorization(options =>
 
 // Register repositories
 builder.Services.AddScoped<INotificationRepository, Listo.Notification.Infrastructure.Repositories.NotificationRepository>();
+builder.Services.AddScoped<ITemplateRepository, Listo.Notification.Infrastructure.Repositories.TemplateRepository>();
+
+// Redis connection (used by rate limiting, presence, typing, read receipts)
+var redisConnStr = builder.Configuration.GetConnectionString("Redis")
+                 ?? builder.Configuration.GetSection("Redis")["ConnectionString"]
+                 ?? "localhost:6379";
+builder.Services.AddSingleton<StackExchange.Redis.IConnectionMultiplexer>(sp =>
+    StackExchange.Redis.ConnectionMultiplexer.Connect(redisConnStr));
 
 // Register application services
 builder.Services.AddScoped<INotificationService, Listo.Notification.Application.Services.NotificationService>();
@@ -163,7 +171,6 @@ builder.Services.AddScoped<ITemplateRenderingService, Listo.Notification.Applica
 builder.Services.AddScoped<IRateLimiterService, Listo.Notification.Infrastructure.Services.RedisTokenBucketLimiter>();
 builder.Services.AddScoped<Listo.Notification.Application.Services.RateLimitingService>();
 builder.Services.AddScoped<Listo.Notification.Application.Services.BudgetEnforcementService>();
-builder.Services.AddSingleton<Listo.Notification.Infrastructure.Services.RedisTokenBucketLimiter>();
 
 // Register Azure Blob Storage for attachments
 builder.Services.AddScoped<IAttachmentStorageService, AttachmentStorageService>();
