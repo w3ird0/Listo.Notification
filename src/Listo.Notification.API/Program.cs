@@ -180,8 +180,22 @@ builder.Services.AddSingleton<ISmsProvider, TwilioSmsProvider>();
 builder.Services.AddSingleton<IEmailProvider, SendGridEmailProvider>();
 builder.Services.Configure<TwilioOptions>(builder.Configuration.GetSection("Twilio"));
 builder.Services.Configure<SendGridOptions>(builder.Configuration.GetSection("SendGrid"));
-builder.Services.AddSingleton<ISmsProvider, TwilioSmsProvider>();
-builder.Services.AddSingleton<IEmailProvider, SendGridEmailProvider>();
+
+// Register FCM push notification provider
+builder.Services.AddHttpClient<IPushProvider, FcmPushProvider>();
+builder.Services.Configure<FcmOptions>(builder.Configuration.GetSection("Fcm"));
+
+// Register Listo.Auth service client for device token lookup
+builder.Services.Configure<Listo.Notification.Infrastructure.Configuration.AuthServiceOptions>(
+    builder.Configuration.GetSection("AuthService"));
+builder.Services.AddHttpClient<IAuthServiceClient, Listo.Notification.Infrastructure.ExternalServices.AuthServiceClient>((sp, client) =>
+{
+    var options = sp.GetRequiredService<IOptions<Listo.Notification.Infrastructure.Configuration.AuthServiceOptions>>().Value;
+    client.BaseAddress = new Uri(options.BaseUrl);
+    client.Timeout = TimeSpan.FromSeconds(options.TimeoutSeconds);
+    client.DefaultRequestHeaders.Add("X-Service-Secret", options.ServiceSecret);
+    client.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+});
 
 // Register Section 9: Real-Time Messaging services
 builder.Services.AddScoped<IPresenceTrackingService, Listo.Notification.Infrastructure.Services.PresenceTrackingService>();

@@ -11,7 +11,7 @@ public class DeviceEntity
 
     public Guid TenantId { get; set; }
 
-    public string UserId { get; set; } = string.Empty;
+    public Guid UserId { get; set; }
 
     /// <summary>
     /// FCM/APNS token (hashed for security)

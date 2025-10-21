@@ -14,17 +14,23 @@ public class NotificationService : INotificationService
     private readonly INotificationRepository _repository;
     private readonly ISmsProvider _smsProvider;
     private readonly IEmailProvider _emailProvider;
+    private readonly IPushProvider _pushProvider;
+    private readonly IAuthServiceClient _authServiceClient;
     private readonly ILogger<NotificationService> _logger;
 
     public NotificationService(
         INotificationRepository repository,
         ISmsProvider smsProvider,
         IEmailProvider emailProvider,
+        IPushProvider pushProvider,
+        IAuthServiceClient authServiceClient,
         ILogger<NotificationService> logger)
     {
         _repository = repository ?? throw new ArgumentNullException(nameof(repository));
         _smsProvider = smsProvider ?? throw new ArgumentNullException(nameof(smsProvider));
         _emailProvider = emailProvider ?? throw new ArgumentNullException(nameof(emailProvider));
+        _pushProvider = pushProvider ?? throw new ArgumentNullException(nameof(pushProvider));
+        _authServiceClient = authServiceClient ?? throw new ArgumentNullException(nameof(authServiceClient));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
@@ -149,7 +155,7 @@ public class NotificationService : INotificationService
             {
                 NotificationChannel.Sms => await _smsProvider.SendAsync(deliveryRequest, cancellationToken),
                 NotificationChannel.Email => await _emailProvider.SendAsync(deliveryRequest, cancellationToken),
-                NotificationChannel.Push => null, // TODO: Implement push provider
+                NotificationChannel.Push => await SendPushNotificationAsync(notification, cancellationToken),
                 NotificationChannel.InApp => null, // InApp goes through SignalR, not providers
                 _ => null
             };
@@ -577,6 +583,127 @@ public class NotificationService : INotificationService
             PageNumber = pageNumber,
             PageSize = pageSize
         };
+    }
+
+    /// <summary>
+    /// Send push notification to all active user devices.
+    /// Fetches device tokens from Listo.Auth service and sends to each device.
+    /// </summary>
+    private async Task<DeliveryResult> SendPushNotificationAsync(
+        NotificationEntity notification,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            // Fetch device tokens from Auth service
+            var deviceTokens = await _authServiceClient.GetUserDeviceTokensAsync(
+                notification.UserId,
+                cancellationToken);
+
+            if (!deviceTokens.Any())
+            {
+                _logger.LogInformation(
+                    "No active devices found for user {UserId}. Notification not sent.",
+                    notification.UserId);
+
+                return new DeliveryResult(
+                    Success: false,
+                    ProviderId: _pushProvider.ProviderName,
+                    ProviderMessageId: null,
+                    ErrorMessage: "No active devices registered for push notifications");
+            }
+
+            _logger.LogInformation(
+                "Sending push notification to {DeviceCount} devices for user {UserId}",
+                deviceTokens.Count, notification.UserId);
+
+            // Send to each device
+            var successCount = 0;
+            var failureCount = 0;
+            var lastSuccessMessageId = string.Empty;
+
+            foreach (var device in deviceTokens)
+            {
+                try
+                {
+                    var deliveryRequest = new DeliveryRequest(
+                        notification.Id,
+                        notification.TenantId,
+                        NotificationChannel.Push,
+                        device.PushToken,
+                        notification.Subject,
+                        notification.Body);
+
+                    var result = await _pushProvider.SendAsync(deliveryRequest, cancellationToken);
+
+                    if (result.Success)
+                    {
+                        successCount++;
+                        lastSuccessMessageId = result.ProviderMessageId ?? string.Empty;
+
+                        _logger.LogInformation(
+                            "Push notification sent successfully: DeviceId={DeviceId}, Platform={Platform}, MessageId={MessageId}",
+                            device.DeviceId, device.Platform, result.ProviderMessageId);
+                    }
+                    else
+                    {
+                        failureCount++;
+
+                        _logger.LogWarning(
+                            "Push notification failed for device {DeviceId}: {ErrorMessage}",
+                            device.DeviceId, result.ErrorMessage);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    failureCount++;
+
+                    _logger.LogError(ex,
+                        "Exception sending push notification to device {DeviceId}",
+                        device.DeviceId);
+                }
+            }
+
+            // Return overall result
+            if (successCount == 0)
+            {
+                return new DeliveryResult(
+                    Success: false,
+                    ProviderId: _pushProvider.ProviderName,
+                    ProviderMessageId: null,
+                    ErrorMessage: $"Failed to send to all {deviceTokens.Count} devices");
+            }
+
+            if (failureCount > 0)
+            {
+                _logger.LogWarning(
+                    "Partial push notification success: {SuccessCount}/{TotalCount} devices",
+                    successCount, deviceTokens.Count);
+            }
+
+            return new DeliveryResult(
+                Success: true,
+                ProviderId: _pushProvider.ProviderName,
+                ProviderMessageId: lastSuccessMessageId,
+                ProviderMetadata: new Dictionary<string, string>
+                {
+                    ["sentToDevices"] = successCount.ToString(),
+                    ["totalDevices"] = deviceTokens.Count.ToString(),
+                    ["failedDevices"] = failureCount.ToString()
+                });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Error in push notification delivery for notification {NotificationId}",
+                notification.Id);
+
+            return new DeliveryResult(
+                Success: false,
+                ProviderId: _pushProvider.ProviderName,
+                ProviderMessageId: null,
+                ErrorMessage: $"Push notification exception: {ex.Message}");
+        }
     }
 
     private static NotificationResponse MapToResponse(NotificationEntity entity)
