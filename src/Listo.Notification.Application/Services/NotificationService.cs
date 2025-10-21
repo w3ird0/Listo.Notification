@@ -349,6 +349,80 @@ public class NotificationService : INotificationService
         };
     }
 
+    public async Task<BatchQueueNotificationResponse> QueueBatchNotificationsAsync(
+        BatchInternalNotificationRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        var notifications = request.Notifications.ToList();
+        var results = new List<QueueNotificationResult>();
+        var queuedCount = 0;
+        var failedCount = 0;
+
+        _logger.LogInformation(
+            "Queueing batch of {Count} notifications from service: {ServiceName}",
+            notifications.Count, request.ServiceName);
+
+        // Process in parallel with degree of parallelism = 10
+        var semaphore = new SemaphoreSlim(10);
+        var tasks = notifications.Select(async (notification, index) =>
+        {
+            await semaphore.WaitAsync(cancellationToken);
+            try
+            {
+                try
+                {
+                    var response = await QueueNotificationAsync(
+                        notification,
+                        request.ServiceName,
+                        cancellationToken);
+
+                    Interlocked.Increment(ref queuedCount);
+
+                    return new QueueNotificationResult
+                    {
+                        Index = index,
+                        Success = true,
+                        QueueId = response.QueueId
+                    };
+                }
+                catch (Exception ex)
+                {
+                    Interlocked.Increment(ref failedCount);
+
+                    _logger.LogError(ex,
+                        "Failed to queue notification at index {Index} in batch",
+                        index);
+
+                    return new QueueNotificationResult
+                    {
+                        Index = index,
+                        Success = false,
+                        ErrorMessage = ex.Message
+                    };
+                }
+            }
+            finally
+            {
+                semaphore.Release();
+            }
+        });
+
+        var allResults = await Task.WhenAll(tasks);
+
+        _logger.LogInformation(
+            "Batch queue completed: {Queued}/{Total} queued, {Failed} failed",
+            queuedCount, notifications.Count, failedCount);
+
+        return new BatchQueueNotificationResponse
+        {
+            TotalRequested = notifications.Count,
+            QueuedCount = queuedCount,
+            FailedCount = failedCount,
+            Results = allResults.OrderBy(r => r.Index),
+            ProcessedAt = DateTime.UtcNow
+        };
+    }
+
     public Task ProcessCloudEventAsync(
         object cloudEvent,
         string serviceName,

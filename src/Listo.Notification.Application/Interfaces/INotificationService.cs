@@ -90,6 +90,14 @@ public interface INotificationService
         string serviceName,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Queues multiple notifications in a batch for async processing.
+    /// Used by other Listo services to send bulk notifications efficiently.
+    /// </summary>
+    Task<BatchQueueNotificationResponse> QueueBatchNotificationsAsync(
+        BatchInternalNotificationRequest request,
+        CancellationToken cancellationToken = default);
+
     Task ProcessCloudEventAsync(
         object cloudEvent,
         string serviceName,
