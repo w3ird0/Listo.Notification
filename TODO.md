@@ -403,7 +403,424 @@ git push origin feature/notification-specs-update
 
 ---
 
-**Last Updated:** 2025-10-20 (Session 5 - API Controllers, Validation & File Uploads Complete + Database Migrations)  
+---
+
+## 🚀 Phase 6: Capability Gaps Implementation (CRITICAL)
+
+**Date Created:** 2025-10-21  
+**Priority:** 🔴 HIGH - Required for Auth & Orders service integration  
+**Estimated Effort:** 21 hours over 3 weeks  
+**Reference:** See `IMPLEMENTATION_PLAN_CAPABILITY_GAPS.md` for detailed implementation guide
+
+### Overview
+Addresses 4 critical capability gaps identified in alignment analysis:
+1. **Device Token Management** - Enable push notifications with FCM
+2. **Batch Notification Endpoint** - Efficient driver broadcasts
+3. **Template-Based API Flow** - Leverage centralized templates
+4. **Synchronous Delivery** - Real-time 2FA support
+
+---
+
+### Week 1: Device Management & Batch Endpoint (12 hours)
+
+#### Task 1.1: Device Token Management (8 hours)
+- [ ] **Database Schema (1 hour)**
+  - [ ] Create migration `20251021_AddDeviceManagement`
+  - [ ] Add Devices table with indexes (TenantId+UserId+Active, DeviceToken unique, UserId+Platform)
+  - [ ] Create DeviceEntity with Platform enum (iOS, Android, Web)
+  - [ ] Create DevicePlatform enum
+  - [ ] Apply migration to LocalDB
+
+- [ ] **DTOs (30 minutes)**
+  - [ ] Create DeviceDtos.cs with RegisterDeviceRequest, UpdateDeviceRequest
+  - [ ] Create DeviceResponse, PagedDevicesResponse
+
+- [ ] **Repository (1 hour)**
+  - [ ] Create IDeviceRepository interface (10 methods)
+  - [ ] Implement DeviceRepository with EF Core
+  - [ ] Add GetByTokenAsync, GetUserDevicesAsync, GetActiveDevicesByPlatformAsync
+  - [ ] Add DeactivateOldDevicesAsync (keep max 5 devices)
+
+- [ ] **Service Layer (1.5 hours)**
+  - [ ] Create IDeviceService interface
+  - [ ] Implement DeviceService with device limit enforcement (max 5 per user)
+  - [ ] Implement auto-deactivation when limit exceeded
+  - [ ] Add GetActiveDeviceTokensAsync for push delivery
+
+- [ ] **API Controller (2 hours)**
+  - [ ] Create DevicesController with [Authorize]
+  - [ ] POST /api/v1/devices/register (201 Created)
+  - [ ] PUT /api/v1/devices/{deviceId} (200 OK)
+  - [ ] DELETE /api/v1/devices/{deviceId} (204 No Content)
+  - [ ] GET /api/v1/devices (paginated list)
+  - [ ] GET /api/v1/devices/{deviceId}
+  - [ ] Add GetUserContext helper for tenant/user extraction from JWT
+
+- [ ] **Push Notification Integration (2 hours)**
+  - [ ] Update NotificationDeliveryService.SendPushNotificationAsync
+  - [ ] Add device token lookup via IDeviceService
+  - [ ] Send to ALL active devices for user (multi-device support)
+  - [ ] Handle FCM errors: auto-deactivate invalid/unregistered tokens
+  - [ ] Add DeactivateDeviceByTokenAsync helper
+  - [ ] Return partial success if some devices fail
+
+- [ ] **Validation (30 minutes)**
+  - [ ] Create RegisterDeviceRequestValidator
+  - [ ] Validate DeviceToken required, max 512 chars
+  - [ ] Validate Platform is valid enum
+  - [ ] Validate DeviceInfo max 1000 chars
+  - [ ] Validate AppVersion max 50 chars
+
+- [ ] **DI Registration (15 minutes)**
+  - [ ] Register IDeviceRepository → DeviceRepository
+  - [ ] Register IDeviceService → DeviceService
+  - [ ] Register RegisterDeviceRequestValidator
+  - [ ] Update NotificationDbContext with Devices DbSet
+  - [ ] Configure DeviceEntity in OnModelCreating
+
+#### Task 1.2: Batch Notification Endpoint (4 hours)
+- [ ] **DTOs (30 minutes)**
+  - [ ] Create BatchInternalNotificationRequest
+  - [ ] Create BatchQueueNotificationResponse (TotalRequested, QueuedCount, FailedCount)
+  - [ ] Create QueueNotificationResult (Index, Success, QueueId, ErrorMessage)
+
+- [ ] **Service Method (1 hour)**
+  - [ ] Add QueueBatchNotificationsAsync to INotificationService
+  - [ ] Implement parallel processing with SemaphoreSlim (degree=10)
+  - [ ] Return partial success (don't fail entire batch)
+  - [ ] Use Interlocked for thread-safe counters
+
+- [ ] **Controller Endpoint (1 hour)**
+  - [ ] Add POST /api/v1/internal/notifications/queue/batch to InternalController
+  - [ ] Validate batch size <= 100 notifications
+  - [ ] Return 400 if empty list
+  - [ ] Return 200 with BatchQueueNotificationResponse
+  - [ ] Log warnings if partial failure
+
+- [ ] **Validation (30 minutes)**
+  - [ ] Create BatchInternalNotificationRequestValidator
+  - [ ] Validate ServiceName required
+  - [ ] Validate Notifications not null and not empty
+  - [ ] Validate batch size <= 100
+  - [ ] Use RuleForEach to validate each notification
+
+- [ ] **Integration Test (1 hour)**
+  - [ ] Create BatchNotificationTests.cs
+  - [ ] Test valid batch of 10 notifications (expect all queued)
+  - [ ] Test batch exceeds limit (101 items, expect 400)
+  - [ ] Test empty batch (expect 400)
+  - [ ] Verify response structure and counts
+
+---
+
+### Week 2: Template-Based Flow (4 hours)
+
+#### Task 2.1: Update Internal API DTOs (1 hour)
+- [ ] **Update InternalNotificationRequest**
+  - [ ] Add TemplateKey property (optional)
+  - [ ] Add Variables property Dictionary<string, object> (optional)
+  - [ ] Add Locale property (optional, default "en-US")
+  - [ ] Keep Subject/Body for backward compatibility
+  - [ ] Document two flows: template-based (preferred) vs pre-rendered (legacy)
+
+#### Task 2.2: Update Notification Service Logic (2 hours)
+- [ ] **Update QueueNotificationAsync**
+  - [ ] Check if TemplateKey is provided
+  - [ ] If yes: call ITemplateRenderingService.RenderTemplateAsync
+  - [ ] Render with Variables and Locale
+  - [ ] On error: fall back to Subject/Body if provided, else throw
+  - [ ] If no TemplateKey: use pre-rendered Subject/Body (backward compat)
+  - [ ] Store TemplateKey and Variables in NotificationQueueEntity
+  - [ ] Add error handling with fallback logging
+
+#### Task 2.3: Update Validators (30 minutes)
+- [ ] **Update InternalNotificationRequestValidator**
+  - [ ] Add rule: Either TemplateKey OR Body must be provided
+  - [ ] If TemplateKey provided, Variables must not be null
+  - [ ] Validate Locale max 10 chars
+
+#### Task 2.4: Template Seeding Script (30 minutes)
+- [ ] **Create TemplateSeedData.cs**
+  - [ ] Create SeedTemplatesAsync method
+  - [ ] Seed 4 Auth templates:
+    - [ ] email_verification (Email, High priority)
+    - [ ] sms_verification (SMS, High priority)
+    - [ ] welcome_email (Email, Normal priority)
+    - [ ] password_reset (Email, High priority)
+  - [ ] Seed 6 Orders templates:
+    - [ ] driver_new_order_available (Push, High)
+    - [ ] driver_order_assigned (Push, High)
+    - [ ] driver_assignment_confirmed (Push, High)
+    - [ ] driver_assignment_cancelled (Push, Normal)
+    - [ ] admin_assignment_timeout (Email, High)
+    - [ ] admin_driver_unassigned (Email, Normal)
+  - [ ] Use try-catch per template (don't fail entire seeding)
+  - [ ] Log success/failure for each template
+
+- [ ] **Run Seeding**
+  - [ ] Create console command or endpoint to trigger seeding
+  - [ ] Seed for default tenant (or all tenants)
+  - [ ] Document seeding process in deployment guide
+
+---
+
+### Week 3: Synchronous Delivery (5 hours)
+
+#### Task 3.1: Update Request DTO (15 minutes)
+- [ ] **Add Synchronous flag to InternalNotificationRequest**
+  - [ ] Add bool Synchronous property (default false)
+  - [ ] Document: if true, send immediately; if false, queue to Service Bus
+
+#### Task 3.2: Update Queue Response (15 minutes)
+- [ ] **Update QueueNotificationResponse**
+  - [ ] Add DateTime? SentAt (only for synchronous)
+  - [ ] Add string? DeliveryStatus ("Delivered", "Failed", "Timeout")
+  - [ ] Add string? DeliveryDetails (error message or provider response)
+
+#### Task 3.3: Implement Synchronous Delivery Service (2 hours)
+- [ ] **Add SendNowAsync to INotificationDeliveryService**
+  - [ ] Create 30-second timeout with CancellationTokenSource
+  - [ ] Route to channel-specific methods (SMS, Email, Push)
+  - [ ] Return DeliveryResult.Failed for unsupported channels
+  - [ ] Update notification entity status (Sent or Failed)
+  - [ ] Handle OperationCanceledException → timeout error
+  - [ ] Catch all exceptions and set Failed status
+
+#### Task 3.4: Update Internal Controller (1.5 hours)
+- [ ] **Update QueueNotification endpoint**
+  - [ ] Check if request.Synchronous == true
+  - [ ] Validate channel: reject In-App for synchronous (return 400)
+  - [ ] Create NotificationEntity from request
+  - [ ] Call _notificationDeliveryService.SendNowAsync
+  - [ ] If success: return 200 with SentAt and DeliveryStatus
+  - [ ] If timeout: return 408 Request Timeout
+  - [ ] If failed: return 200 with Failed status (don't return 500)
+
+- [ ] **Add CreateNotificationEntityAsync helper**
+  - [ ] Render template if TemplateKey provided
+  - [ ] Fall back to Subject/Body if no template
+  - [ ] Create NotificationEntity with all fields
+  - [ ] Save to database
+
+#### Task 3.5: Update Validator (30 minutes)
+- [ ] **Update InternalNotificationRequestValidator**
+  - [ ] Add rule: If Synchronous, Channel cannot be InApp
+  - [ ] Add warning rule: Synchronous recommended for SMS only
+
+#### Task 3.6: Integration Test (30 minutes)
+- [ ] **Create SynchronousDeliveryTests.cs**
+  - [ ] Test synchronous SMS delivery (expect immediate SentAt)
+  - [ ] Test synchronous In-App delivery (expect 400)
+  - [ ] Test async delivery still works (no SentAt)
+  - [ ] Verify response structure for sync vs async
+
+---
+
+## Testing & Quality Assurance
+
+### Unit Tests
+- [ ] **Device Management**
+  - [ ] DeviceRepository tests (CRUD operations)
+  - [ ] DeviceService tests (device limit, auto-deactivation)
+  - [ ] RegisterDeviceRequestValidator tests
+
+- [ ] **Batch Endpoint**
+  - [ ] NotificationService.QueueBatchNotificationsAsync tests
+  - [ ] BatchInternalNotificationRequestValidator tests
+  - [ ] Test parallel processing with mocked delays
+
+- [ ] **Template Flow**
+  - [ ] Template rendering with variables
+  - [ ] Fallback to pre-rendered content
+  - [ ] Template not found error handling
+
+- [ ] **Synchronous Delivery**
+  - [ ] SendNowAsync timeout handling
+  - [ ] Channel validation (In-App rejected)
+  - [ ] Status update on success/failure
+
+**Target Coverage:** 85%+
+
+### Integration Tests
+- [ ] **Device Registration End-to-End**
+  - [ ] Register device → Get device → Update device → Delete device
+  - [ ] Test device limit (register 6th device, verify 1st deactivated)
+  - [ ] Test device token reuse (moved between users)
+
+- [ ] **Batch Notification with Failures**
+  - [ ] Send batch of 50 (25 valid, 25 invalid)
+  - [ ] Verify partial success response
+  - [ ] Check individual results array
+
+- [ ] **Template-Based vs Pre-Rendered**
+  - [ ] Send with TemplateKey (verify rendering)
+  - [ ] Send with Subject/Body only (verify backward compat)
+  - [ ] Send with TemplateKey + fallback (template not found)
+
+- [ ] **Synchronous SMS Delivery**
+  - [ ] Mock Twilio client
+  - [ ] Verify immediate response with SentAt
+  - [ ] Test timeout scenario
+
+### Load Tests (Optional)
+- [ ] Batch endpoint: 1000 notifications in 100 batches (target < 2 sec per batch)
+- [ ] Device lookup: 10,000 concurrent GetActiveDeviceTokensAsync calls
+- [ ] Template rendering: 1000 renders/second
+
+---
+
+## Deployment Checklist
+
+### Pre-Deployment
+- [ ] All unit tests passing (85%+ coverage)
+- [ ] All integration tests passing
+- [ ] Database migration script reviewed
+- [ ] Feature flags configured in appsettings
+- [ ] Monitoring dashboards updated
+- [ ] Rollback plan documented
+
+### Week 1 Deployment
+- [ ] **Day 1: Database Migration**
+  - [ ] Run AddDeviceManagement migration in dev environment
+  - [ ] Verify indexes created
+  - [ ] Run AddDeviceManagement migration in staging
+  - [ ] Run AddDeviceManagement migration in production
+
+- [ ] **Day 2: Deploy Notification Service (Phase 1)**
+  - [ ] Deploy with Device Management + Batch Endpoint
+  - [ ] Verify health endpoint: GET /api/v1/internal/health
+  - [ ] Test device registration with curl/Postman
+  - [ ] Test batch endpoint with sample payload
+
+### Week 2 Deployment
+- [ ] **Day 1: Update Auth Service**
+  - [ ] Install Listo.Notification.Contracts package
+  - [ ] Update NotificationService to use new DTOs
+  - [ ] Update endpoint URLs
+  - [ ] Deploy with feature flag `UseNewNotificationAPI=false`
+  - [ ] Enable flag for 10% of tenants (canary)
+  - [ ] Monitor error rates for 24 hours
+  - [ ] Enable for 50% of tenants
+  - [ ] Enable for 100% of tenants
+
+- [ ] **Day 2: Update Orders Service**
+  - [ ] Install Listo.Notification.Contracts package
+  - [ ] Update NotificationService to use batch endpoint
+  - [ ] Deploy with feature flag `UseNewNotificationAPI=false`
+  - [ ] Gradual rollout (10% → 50% → 100%)
+
+- [ ] **Day 3: Seed Templates**
+  - [ ] Run TemplateSeedData.SeedTemplatesAsync for all tenants
+  - [ ] Verify templates in database
+  - [ ] Test rendering for each template
+
+- [ ] **Day 4-5: Enable Template-Based Flow**
+  - [ ] Enable feature flag `UseTemplateBasedFlow=true` for 10% tenants
+  - [ ] Monitor "template not found" errors
+  - [ ] Roll back if error rate > 5%
+  - [ ] Enable for 100% of tenants
+
+### Week 3 Deployment
+- [ ] **Day 1: Deploy Synchronous Delivery**
+  - [ ] Deploy Notification service with sync delivery support
+  - [ ] Enable feature flag `UseSynchronousDelivery=true` for Auth service only
+  - [ ] Monitor timeout rates (should be < 1%)
+  - [ ] Enable for Orders service if needed
+
+---
+
+## Rollback Strategy
+
+### Quick Rollback (< 5 minutes)
+- [ ] **Feature Flags** (immediate effect, no deployment)
+  ```json
+  {
+    "UseNewNotificationAPI": false,
+    "UseTemplateBasedFlow": false,
+    "UseSynchronousDelivery": false
+  }
+  ```
+
+### Database Rollback (if needed)
+- [ ] Run migration rollback:
+  ```powershell
+  dotnet ef database update <PreviousMigrationName> --project src/Listo.Notification.API
+  ```
+- [ ] Verify rollback in dev first
+- [ ] Apply to staging, then production
+
+### Service Rollback
+- [ ] Redeploy previous version from Azure Container Registry
+- [ ] Update feature flags to disabled state
+- [ ] Verify health endpoints
+- [ ] Monitor error rates for 15 minutes
+- [ ] Document rollback reason and learnings
+
+---
+
+## Monitoring & Alerts
+
+### Metrics to Track
+- [ ] Device registration rate (requests/minute)
+- [ ] Device registration failure rate (target < 5%)
+- [ ] Batch notification throughput (notifications/second)
+- [ ] Batch endpoint latency (target < 2 seconds)
+- [ ] Template rendering latency (target < 100ms)
+- [ ] Template not found errors (target 0 after seeding)
+- [ ] Synchronous delivery timeout rate (target < 1%)
+- [ ] FCM token invalidation rate
+
+### Alerts (Application Insights)
+- [ ] Device registration failures > 5% (severity: High)
+- [ ] Batch endpoint latency > 2 seconds (severity: Medium)
+- [ ] Template not found errors > 10/minute (severity: High)
+- [ ] Synchronous delivery timeout rate > 10% (severity: Critical)
+- [ ] Push notification delivery failure > 20% (severity: High)
+
+---
+
+## Success Criteria
+
+### Phase 1 (Week 1)
+- [ ] ✅ 1000+ devices registered successfully
+- [ ] ✅ Batch endpoint handles 100 notifications in < 2 seconds
+- [ ] ✅ Push notifications deliver to all active devices
+- [ ] ✅ Invalid FCM tokens auto-deactivated
+- [ ] ✅ Zero data loss during device token management
+
+### Phase 2 (Week 2)
+- [ ] ✅ 90% of notifications use template-based flow
+- [ ] ✅ Template rendering < 100ms average
+- [ ] ✅ Zero template not found errors (after seeding)
+- [ ] ✅ Backward compatibility maintained (pre-rendered still works)
+- [ ] ✅ Auth and Orders services successfully migrated
+
+### Phase 3 (Week 3)
+- [ ] ✅ SMS synchronous delivery < 5 seconds average
+- [ ] ✅ Timeout rate < 1%
+- [ ] ✅ Auth service 2FA flow works seamlessly
+- [ ] ✅ Zero failures due to sync delivery issues
+- [ ] ✅ In-App channel properly rejected for sync requests
+
+---
+
+## Documentation Updates
+
+- [ ] Update NOTIFICATION_MGMT_PLAN.md with device management section
+- [ ] Update notification_api_endpoints.md with:
+  - [ ] Device registration endpoints
+  - [ ] Batch notification endpoint
+  - [ ] Template-based request examples
+  - [ ] Synchronous delivery flag documentation
+- [ ] Create DEVICE_MANAGEMENT.md guide
+- [ ] Create TEMPLATE_USAGE_GUIDE.md for Auth/Orders teams
+- [ ] Update SERVICE_EVENT_MAPPINGS.md with template keys
+- [ ] Update AUTHENTICATION_CONFIGURATION.md with device auth flow
+
+---
+
+**Last Updated:** 2025-10-21 (Phase 6 Plan Created - Capability Gaps Implementation)  
 **Branch:** `main`  
-**Status:** Phase 4 In Progress - API Layer Complete, Database Migrations Applied, Service Implementations Pending  
-**Commit:** Pending - Migrations applied to LocalDB
+**Status:** Phase 6 Planning Complete - Ready for Implementation  
+**Next Action:** Start Week 1, Task 1.1 - Device Token Management Database Schema  
+**Reference:** `IMPLEMENTATION_PLAN_CAPABILITY_GAPS.md`, `NOTIFICATION_SERVICE_ALIGNMENT_REPORT.md`, `NOTIFICATION_CAPABILITY_GAP_ANALYSIS.md`

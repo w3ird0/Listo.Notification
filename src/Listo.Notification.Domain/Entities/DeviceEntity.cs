@@ -9,6 +9,8 @@ public class DeviceEntity
 {
     public Guid DeviceId { get; set; }
 
+    public Guid TenantId { get; set; }
+
     public string UserId { get; set; } = string.Empty;
 
     /// <summary>
@@ -25,6 +27,8 @@ public class DeviceEntity
     /// JSON: model, osVersion, appVersion
     /// </summary>
     public string? DeviceInfo { get; set; }
+
+    public string? AppVersion { get; set; }
 
     public DateTime LastSeen { get; set; }
 

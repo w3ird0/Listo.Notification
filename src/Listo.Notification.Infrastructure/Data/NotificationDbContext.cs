@@ -167,16 +167,27 @@ public class NotificationDbContext : DbContext
             entity.ToTable("Devices");
             entity.HasKey(e => e.DeviceId);
 
-            entity.HasIndex(e => new { e.UserId, e.Active })
-                .HasDatabaseName("IX_Devices_UserId_Active");
+            entity.Property(e => e.DeviceToken).HasMaxLength(512).IsRequired();
+            entity.Property(e => e.DeviceInfo).HasMaxLength(1024);
+            entity.Property(e => e.AppVersion).HasMaxLength(50);
+            entity.Property(e => e.UserId).HasMaxLength(450).IsRequired();
+
+            entity.HasIndex(e => new { e.TenantId, e.UserId, e.Active })
+                .HasDatabaseName("IX_Devices_TenantId_UserId_Active");
+
+            entity.HasIndex(e => new { e.TenantId, e.Platform, e.Active })
+                .HasDatabaseName("IX_Devices_TenantId_Platform_Active");
 
             entity.HasIndex(e => e.LastSeen)
                 .HasDatabaseName("IX_Devices_LastSeen");
 
-            // Unique constraint on device token
+            // Unique constraint on device token (globally unique per requirements)
             entity.HasIndex(e => e.DeviceToken)
                 .IsUnique()
                 .HasDatabaseName("UX_Devices_DeviceToken");
+
+            // Global query filter for tenant isolation
+            entity.HasQueryFilter(e => _tenantId == null || e.TenantId == _tenantId);
         });
 
         // Configure AuditLog table
