@@ -57,12 +57,13 @@ public class InternalNotificationRequestValidator : AbstractValidator<InternalNo
             {
                 if (request.Synchronous && request.Channel != NotificationChannel.Sms)
                 {
-                    context.AddFailure(new FluentValidation.Results.ValidationFailure(
+                    var failure = new FluentValidation.Results.ValidationFailure(
                         nameof(request.Synchronous),
-                        "Synchronous delivery is recommended for SMS only (critical use cases)"))
+                        "Synchronous delivery is recommended for SMS only (critical use cases)")
                     {
                         Severity = Severity.Warning
                     };
+                    context.AddFailure(failure);
                 }
             });
     }
