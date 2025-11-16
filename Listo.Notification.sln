@@ -5,15 +5,15 @@ VisualStudioVersion = 17.0.31903.59
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{827E0CD3-B72D-47B6-A68D-7590B98EB39B}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Listo.Notification.Domain", "src\Listo.Notification.Domain\Listo.Notification.Domain.csproj", "{843071E5-5DA9-47CB-B408-31242773F2DD}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Listo.Notification.Domain", "Listo.Notification.Domain\Listo.Notification.Domain.csproj", "{843071E5-5DA9-47CB-B408-31242773F2DD}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Listo.Notification.Application", "src\Listo.Notification.Application\Listo.Notification.Application.csproj", "{18AE08FC-D0E9-45F0-AAD7-01F88629CBEA}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Listo.Notification.Application", "Listo.Notification.Application\Listo.Notification.Application.csproj", "{18AE08FC-D0E9-45F0-AAD7-01F88629CBEA}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Listo.Notification.Infrastructure", "src\Listo.Notification.Infrastructure\Listo.Notification.Infrastructure.csproj", "{C76E4B9E-2126-40C1-B204-C00102FC6BCB}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Listo.Notification.Infrastructure", "Listo.Notification.Infrastructure\Listo.Notification.Infrastructure.csproj", "{C76E4B9E-2126-40C1-B204-C00102FC6BCB}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Listo.Notification.API", "src\Listo.Notification.API\Listo.Notification.API.csproj", "{1AF09A70-CACE-4F16-BD4A-0E3CB5EEE604}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Listo.Notification.API", "Listo.Notification.API\Listo.Notification.API.csproj", "{1AF09A70-CACE-4F16-BD4A-0E3CB5EEE604}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Listo.Notification.Functions", "src\Listo.Notification.Functions\Listo.Notification.Functions.csproj", "{DCB2A460-E4B7-4EE9-8623-D6729C73F26C}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Listo.Notification.Functions", "Listo.Notification.Functions\Listo.Notification.Functions.csproj", "{DCB2A460-E4B7-4EE9-8623-D6729C73F26C}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
